@@ -8,6 +8,7 @@ export type CharacterRecord = Tables<"characters">;
 export type ScriptLineRecord = Tables<"script_lines">;
 export type RehearsalSessionRecord = Tables<"rehearsal_sessions">;
 export type RehearsalHighlightRecord = Tables<"rehearsal_highlights">;
+export type TeleprompterRecordingRecord = Tables<"teleprompter_recordings">;
 
 export type ScriptLineWithCharacter = ScriptLineRecord & {
   character: CharacterRecord | null;
@@ -34,6 +35,20 @@ export type ScriptSetup = {
 export type ScriptDetails = {
   scenes: SceneRecord[];
   characters: CharacterRecord[];
+  lines: ScriptLineWithCharacter[];
+};
+
+export type ImportedScriptLine = {
+  characterName: string | null;
+  text: string;
+};
+
+export type ScriptImportDraft = {
+  title: string;
+  author?: string | null;
+  genre?: string | null;
+  description?: string | null;
+  rawText: string;
 };
 
 export type RehearsalDraft = {
@@ -78,6 +93,11 @@ async function getCurrentUser() {
 
   if (error) return null;
   return user;
+}
+
+export async function getCurrentUserId() {
+  const user = await getCurrentUser();
+  return user?.id ?? null;
 }
 
 export async function getPerfilUsuario() {
@@ -136,11 +156,12 @@ export async function updatePerfilUsuario(patch: TablesUpdate<"perfil_usuario">)
   return data;
 }
 
-export async function getScripts() {
-  const { data, error } = await supabase
-    .from("scripts")
-    .select("*")
-    .order("updated_at", { ascending: false });
+export async function getScripts(options: { includeDeleted?: boolean } = {}) {
+  let query = supabase.from("scripts").select("*").order("updated_at", { ascending: false });
+
+  if (!options.includeDeleted) query = query.is("deleted_at", null);
+
+  const { data, error } = await query;
 
   if (error) throw error;
   return data ?? [];
@@ -235,11 +256,339 @@ export async function getScriptDetails(scriptId: string): Promise<ScriptDetails>
     getScenesForScript(scriptId),
     getCharactersForScript(scriptId),
   ]);
+  const sortedScenes = sortByOrder(scenes);
+  const linesByScene = await Promise.all(sortedScenes.map((scene) => getSceneLines(scene.id)));
 
   return {
+    scenes: sortedScenes,
+    characters: sortByOrder(characters),
+    lines: linesByScene.flat(),
+  };
+}
+
+export async function importScriptFromText(draft: ScriptImportDraft) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error("Inicia sesion para importar libretos.");
+
+  const parsedLines = parseImportedScriptLines(draft.rawText);
+  if (parsedLines.length === 0) {
+    throw new Error("No se encontraron lineas de dialogo para importar.");
+  }
+
+  const characterNames = Array.from(
+    new Set(parsedLines.map((line) => line.characterName).filter(Boolean)),
+  ) as string[];
+  const now = new Date().toISOString();
+
+  const { data: script, error: scriptError } = await supabase
+    .from("scripts")
+    .insert({
+      user_id: user.id,
+      title: draft.title.trim(),
+      author: draft.author?.trim() || null,
+      genre: draft.genre?.trim() || "Importado",
+      description: draft.description?.trim() || "Libreto importado desde archivo.",
+      act_count: 1,
+      is_public: false,
+      is_active: false,
+      is_favorite: false,
+      raw_text: draft.rawText,
+      source_type: "imported",
+      imported_at: now,
+    })
+    .select("*")
+    .single();
+
+  if (scriptError) throw scriptError;
+
+  try {
+    const { data: scene, error: sceneError } = await supabase
+      .from("scenes")
+      .insert({
+        script_id: script.id,
+        title: "Escena importada",
+        description: "Escena creada automaticamente al importar el libreto.",
+        sort_order: 1,
+      })
+      .select("*")
+      .single();
+
+    if (sceneError) throw sceneError;
+
+    const insertedCharacters = characterNames.length
+      ? await insertCharactersForScript(script.id, characterNames)
+      : [];
+    const characterByName = new Map(
+      insertedCharacters.map((character) => [normalizeName(character.name), character.id]),
+    );
+
+    const lines: TablesInsert<"script_lines">[] = parsedLines.map((line, index) => ({
+      scene_id: scene.id,
+      character_id: line.characterName
+        ? (characterByName.get(normalizeName(line.characterName)) ?? null)
+        : null,
+      line_order: index + 1,
+      text: line.text,
+      duration_seconds: estimateLineDuration(line.text),
+    }));
+
+    const { error: linesError } = await supabase.from("script_lines").insert(lines);
+    if (linesError) throw linesError;
+
+    return script;
+  } catch (error) {
+    await supabase.from("scripts").delete().eq("id", script.id).eq("user_id", user.id);
+    throw error;
+  }
+}
+
+export async function updateScript(scriptId: string, patch: TablesUpdate<"scripts">) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error("Inicia sesion para editar libretos.");
+
+  const { data, error } = await supabase
+    .from("scripts")
+    .update(patch)
+    .eq("id", scriptId)
+    .eq("user_id", user.id)
+    .select("*")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function toggleScriptFavorite(script: ScriptRecord) {
+  return updateScript(script.id, { is_favorite: !script.is_favorite });
+}
+
+export async function setActiveScript(script: ScriptRecord) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error("Inicia sesion para activar libretos.");
+  if (script.user_id !== user.id) throw new Error("Solo puedes activar tus libretos importados.");
+
+  const { error: clearError } = await supabase
+    .from("scripts")
+    .update({ is_active: false })
+    .eq("user_id", user.id);
+  if (clearError) throw clearError;
+
+  return updateScript(script.id, { is_active: true });
+}
+
+export async function softDeleteScript(script: ScriptRecord) {
+  return updateScript(script.id, { deleted_at: new Date().toISOString(), is_active: false });
+}
+
+export async function restoreScript(script: ScriptRecord) {
+  return updateScript(script.id, { deleted_at: null });
+}
+
+export async function deleteScriptPermanently(script: ScriptRecord) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error("Inicia sesion para eliminar libretos.");
+
+  const { error } = await supabase
+    .from("scripts")
+    .delete()
+    .eq("id", script.id)
+    .eq("user_id", user.id);
+
+  if (error) throw error;
+}
+
+export async function duplicateScript(scriptId: string) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error("Inicia sesion para duplicar libretos.");
+
+  const bundle = await getScriptBundle(scriptId);
+  const { script, scenes, characters, linesByScene } = bundle;
+
+  const { data: copy, error: copyError } = await supabase
+    .from("scripts")
+    .insert({
+      user_id: user.id,
+      title: `${script.title} (copia)`,
+      author: script.author,
+      genre: script.genre,
+      act_count: script.act_count,
+      description: script.description,
+      is_public: false,
+      is_active: false,
+      is_favorite: false,
+      raw_text: script.raw_text,
+      source_type: "duplicated",
+      imported_at: new Date().toISOString(),
+    })
+    .select("*")
+    .single();
+
+  if (copyError) throw copyError;
+
+  try {
+    const characterIdMap = new Map<string, string>();
+    if (characters.length) {
+      const copiedCharacters = await insertCharactersForScript(
+        copy.id,
+        characters.map((character) => character.name),
+        characters,
+      );
+      copiedCharacters.forEach((character, index) => {
+        characterIdMap.set(characters[index].id, character.id);
+      });
+    }
+
+    for (const scene of scenes) {
+      const { data: copiedScene, error: sceneError } = await supabase
+        .from("scenes")
+        .insert({
+          script_id: copy.id,
+          title: scene.title,
+          location: scene.location,
+          description: scene.description,
+          sort_order: scene.sort_order,
+        })
+        .select("*")
+        .single();
+
+      if (sceneError) throw sceneError;
+
+      const copiedLines = (linesByScene.get(scene.id) ?? []).map((line) => ({
+        scene_id: copiedScene.id,
+        character_id: line.character_id ? (characterIdMap.get(line.character_id) ?? null) : null,
+        line_order: line.line_order,
+        text: line.text,
+        cue: line.cue,
+        duration_seconds: line.duration_seconds,
+      }));
+
+      if (copiedLines.length) {
+        const { error: linesError } = await supabase.from("script_lines").insert(copiedLines);
+        if (linesError) throw linesError;
+      }
+    }
+
+    return copy;
+  } catch (error) {
+    await supabase.from("scripts").delete().eq("id", copy.id).eq("user_id", user.id);
+    throw error;
+  }
+}
+
+async function insertCharactersForScript(
+  scriptId: string,
+  names: string[],
+  sourceCharacters?: CharacterRecord[],
+) {
+  const inserts: TablesInsert<"characters">[] = names.map((name, index) => {
+    const source = sourceCharacters?.[index];
+    return {
+      script_id: scriptId,
+      name,
+      role: source?.role ?? null,
+      actor_type: source?.actor_type ?? (index === 0 ? "user" : "ai"),
+      voice: source?.voice ?? null,
+      base_emotion: source?.base_emotion ?? "Neutral",
+      sort_order: source?.sort_order ?? index + 1,
+    };
+  });
+
+  const { data, error } = await supabase
+    .from("characters")
+    .insert(inserts)
+    .select("*")
+    .order("sort_order", { ascending: true });
+
+  if (error) throw error;
+  return data ?? [];
+}
+
+async function getScriptBundle(scriptId: string) {
+  const { data: script, error: scriptError } = await supabase
+    .from("scripts")
+    .select("*")
+    .eq("id", scriptId)
+    .single();
+  if (scriptError) throw scriptError;
+
+  const [scenes, characters] = await Promise.all([
+    getScenesForScript(scriptId),
+    getCharactersForScript(scriptId),
+  ]);
+  const linesByScene = new Map<string, ScriptLineRecord[]>();
+
+  for (const scene of scenes) {
+    const { data, error } = await supabase
+      .from("script_lines")
+      .select("*")
+      .eq("scene_id", scene.id)
+      .order("line_order", { ascending: true });
+    if (error) throw error;
+    linesByScene.set(scene.id, data ?? []);
+  }
+
+  return {
+    script,
     scenes: sortByOrder(scenes),
     characters: sortByOrder(characters),
+    linesByScene,
   };
+}
+
+function parseImportedScriptLines(rawText: string): ImportedScriptLine[] {
+  const normalizedLines = rawText
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const parsed: ImportedScriptLine[] = [];
+  let currentCharacter: string | null = null;
+  let buffer: string[] = [];
+
+  const flush = () => {
+    const text = buffer.join(" ").replace(/\s+/g, " ").trim();
+    if (text) parsed.push({ characterName: currentCharacter, text });
+    buffer = [];
+  };
+
+  for (const line of normalizedLines) {
+    if (isCharacterCue(line)) {
+      flush();
+      currentCharacter = cleanCharacterName(line);
+      continue;
+    }
+
+    buffer.push(line);
+  }
+
+  flush();
+  return parsed;
+}
+
+function isCharacterCue(line: string) {
+  const cleaned = cleanCharacterName(line);
+  if (!cleaned || cleaned.length > 40) return false;
+  if (/^\d+$/.test(cleaned)) return false;
+  if (/[.!?¿¡]/.test(cleaned)) return false;
+  return cleaned === cleaned.toUpperCase() && /[A-ZÁÉÍÓÚÑ]/i.test(cleaned);
+}
+
+function cleanCharacterName(value: string) {
+  return value.replace(/[:.-]+$/g, "").trim();
+}
+
+function normalizeName(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function estimateLineDuration(text: string) {
+  const words = text.split(/\s+/).filter(Boolean).length;
+  return Math.max(3, Math.min(12, Math.round(words / 2.4)));
 }
 
 export async function createRehearsalSession(draft: RehearsalDraft) {
@@ -265,6 +614,41 @@ export async function createRehearsalSession(draft: RehearsalDraft) {
     .insert(insert)
     .select("*")
     .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function updateRehearsalSession(
+  sessionId: string,
+  patch: TablesUpdate<"rehearsal_sessions">,
+) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error("Inicia sesion para sincronizar tu ensayo.");
+
+  const { data, error } = await supabase
+    .from("rehearsal_sessions")
+    .update(patch)
+    .eq("id", sessionId)
+    .eq("user_id", user.id)
+    .select("*")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+export async function createTeleprompterRecording(
+  recording: Omit<TablesInsert<"teleprompter_recordings">, "user_id">,
+) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error("Inicia sesion para guardar la grabacion.");
+
+  const { data, error } = await supabase
+    .from("teleprompter_recordings")
+    .insert({ ...recording, user_id: user.id })
+    .select("*")
+    .single();
+
   if (error) throw error;
   return data;
 }

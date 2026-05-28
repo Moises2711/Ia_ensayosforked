@@ -24,7 +24,14 @@ import {
   getScriptSetup,
   getScripts,
   updatePerfilUsuario,
+  updateRehearsalSession,
 } from "@/lib/rehearsal-data";
+import {
+  buildTeleprompterScriptText,
+  createTeleprompterSession,
+  loadTeleprompterScriptText,
+  teleprompterApiUrl,
+} from "@/lib/teleprompter-api";
 
 export const Route = createFileRoute("/configuracion-ensayo")({
   component: ConfigEnsayo,
@@ -123,12 +130,18 @@ function ConfigEnsayo() {
   });
 
   const startRehearsal = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       if (!setup?.script || !setup.scene) {
         throw new Error("Selecciona un libreto y una escena.");
       }
+      if (!setup.lines.length) {
+        throw new Error("La escena seleccionada no tiene lineas para sincronizar.");
+      }
+      if (!selectedCharacter) {
+        throw new Error("Selecciona el personaje que vas a interpretar.");
+      }
 
-      return createRehearsalSession({
+      const rehearsal = await createRehearsalSession({
         scriptId: setup.script.id,
         sceneId: setup.scene.id,
         selectedCharacterId,
@@ -139,6 +152,44 @@ function ConfigEnsayo() {
         feedbackEnabled: feedback,
         totalLines: setup.lines.length,
       });
+
+      try {
+        const text = buildTeleprompterScriptText({
+          title: setup.script.title,
+          sceneTitle: setup.scene.title,
+          lines: setup.lines,
+        });
+        const otherCharacter =
+          setup.characters.find((character) => character.id !== selectedCharacter.id) ??
+          selectedCharacter;
+
+        await loadTeleprompterScriptText(text, "es");
+        const teleprompterSession = await createTeleprompterSession({
+          scriptId: setup.script.id,
+          myCharacter: selectedCharacter.name,
+          otherCharacter: otherCharacter.name,
+        });
+
+        return updateRehearsalSession(rehearsal.id, {
+          teleprompter_session_id: teleprompterSession.session_id,
+          teleprompter_status: "ready",
+          teleprompter_last_event: `Sesion FastAPI creada para ${teleprompterSession.my_character}`,
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "No se pudo conectar con el backend del teleprompter.";
+
+        await updateRehearsalSession(rehearsal.id, {
+          teleprompter_status: "error",
+          teleprompter_last_event: message,
+        }).catch(() => null);
+
+        throw new Error(
+          `El ensayo se guardo en Postgres, pero no se pudo iniciar el teleprompter: ${message}`,
+        );
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["recent-rehearsals"] });
@@ -401,7 +452,9 @@ function ConfigEnsayo() {
             <Sparkles className="w-4 h-4 text-primary shrink-0" />
             <div>
               <div className="text-primary">Listo para sincronizar tu ensayo.</div>
-              <div className="text-muted-foreground">Se guardara en rehearsal_sessions.</div>
+              <div className="text-muted-foreground">
+                Postgres + FastAPI en {teleprompterApiUrl("/health")}.
+              </div>
             </div>
           </div>
         </aside>

@@ -1,5 +1,7 @@
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { toast } from "sonner";
 import {
   Square,
   Crown,
@@ -20,8 +22,14 @@ import { TopBar } from "@/components/TopBar";
 import {
   getLatestRehearsal,
   getScriptSetup,
+  updateRehearsalSession,
   type ScriptLineWithCharacter,
 } from "@/lib/rehearsal-data";
+import {
+  teleprompterWsUrl,
+  type TeleprompterSegment,
+  type TeleprompterWsEvent,
+} from "@/lib/teleprompter-api";
 
 export const Route = createFileRoute("/ensayo")({
   component: Ensayo,
@@ -42,6 +50,15 @@ function Wave({ active }: { active?: boolean }) {
 }
 
 function Ensayo() {
+  const wsRef = useRef<WebSocket | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState("Esperando sesion");
+  const [isConnected, setIsConnected] = useState(false);
+  const [isRehearsing, setIsRehearsing] = useState(false);
+  const [activeSegment, setActiveSegment] = useState<TeleprompterSegment | null>(null);
+  const [isMyTurn, setIsMyTurn] = useState(false);
+  const [liveTranscript, setLiveTranscript] = useState("");
+  const [playingCharacter, setPlayingCharacter] = useState<string | null>(null);
+
   const { data: latest, isLoading: rehearsalLoading } = useQuery({
     queryKey: ["latest-rehearsal"],
     queryFn: getLatestRehearsal,
@@ -52,17 +69,133 @@ function Ensayo() {
   });
 
   const loading = rehearsalLoading || setupLoading;
-  const lines = setup?.lines ?? [];
-  const currentLine = lines[0] ?? null;
-  const nextLine = lines[1] ?? null;
-  const afterLine = lines[2] ?? null;
+  const lines = useMemo(() => setup?.lines ?? [], [setup?.lines]);
+  const matchedLine = useMemo(
+    () => (activeSegment ? findLineForSegment(lines, activeSegment) : null),
+    [activeSegment, lines],
+  );
+  const activeLineIndex = matchedLine ? lines.findIndex((line) => line.id === matchedLine.id) : 0;
+  const currentLine = matchedLine ?? lines[0] ?? null;
+  const nextLine = lines[activeLineIndex + 1] ?? null;
+  const afterLine = lines[activeLineIndex + 2] ?? null;
   const selectedCharacter =
     latest?.selectedCharacter ??
     setup?.characters.find((item) => item.actor_type === "user") ??
     null;
-  const completed = latest?.completed_lines ?? Math.min(1, lines.length);
+  const completed = Math.max(
+    latest?.completed_lines ?? 0,
+    activeLineIndex > 0 ? activeLineIndex : Math.min(1, lines.length),
+  );
   const total = latest?.total_lines || lines.length || 1;
   const progress = Math.min(100, Math.round((completed / total) * 100));
+  const teleprompterSessionId = latest?.teleprompter_session_id ?? null;
+  const canUseTeleprompter = Boolean(teleprompterSessionId && isConnected);
+
+  useEffect(() => {
+    if (!teleprompterSessionId) {
+      setConnectionStatus(
+        latest?.teleprompter_status === "error"
+          ? "Teleprompter con error"
+          : "Sin sesion de teleprompter",
+      );
+      setIsConnected(false);
+      return;
+    }
+
+    const ws = new WebSocket(teleprompterWsUrl(`/ws/rehearsal/${teleprompterSessionId}`));
+    wsRef.current = ws;
+    setConnectionStatus("Conectando teleprompter...");
+    setIsConnected(false);
+
+    ws.onopen = () => {
+      setIsConnected(true);
+      setConnectionStatus("Teleprompter conectado");
+    };
+
+    ws.onmessage = (event) => {
+      let message: TeleprompterWsEvent;
+      try {
+        message = JSON.parse(event.data) as TeleprompterWsEvent;
+      } catch {
+        setConnectionStatus("Respuesta invalida del teleprompter");
+        return;
+      }
+
+      if (message.event === "status") {
+        if (message.message !== "keepalive") setConnectionStatus(message.message);
+        if (message.message.toLowerCase().includes("iniciado")) setIsRehearsing(true);
+        if (message.message.toLowerCase().includes("detenido")) setIsRehearsing(false);
+        return;
+      }
+
+      if (message.event === "error") {
+        setConnectionStatus(message.message);
+        toast.error(message.message);
+        return;
+      }
+
+      if (message.event === "transcription") {
+        setLiveTranscript(message.text);
+        return;
+      }
+
+      if (message.event === "segment_change") {
+        setActiveSegment(message.segment);
+        setIsMyTurn(message.is_my_turn);
+        return;
+      }
+
+      if (message.event === "playback_start") {
+        setPlayingCharacter(message.character);
+        return;
+      }
+
+      if (message.event === "playback_finish") {
+        setPlayingCharacter(null);
+        return;
+      }
+
+      if (message.event === "missing_audio") {
+        setConnectionStatus(`Falta audio para ${message.segment.character ?? "este segmento"}`);
+      }
+    };
+
+    ws.onerror = () => {
+      setConnectionStatus("No se pudo conectar con FastAPI");
+      setIsConnected(false);
+    };
+
+    ws.onclose = () => {
+      setIsConnected(false);
+      setIsRehearsing(false);
+      setPlayingCharacter(null);
+      if (wsRef.current === ws) wsRef.current = null;
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, [latest?.teleprompter_status, teleprompterSessionId]);
+
+  const sendTeleprompterAction = (action: "start" | "stop" | "reset") => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      toast.error("El teleprompter no esta conectado. Revisa que FastAPI este encendido.");
+      return;
+    }
+
+    wsRef.current.send(JSON.stringify({ action }));
+
+    if (latest?.id) {
+      const status = action === "start" ? "running" : action === "stop" ? "stopped" : "ready";
+      updateRehearsalSession(latest.id, {
+        teleprompter_status: status,
+        teleprompter_last_event: `Accion enviada: ${action}`,
+      }).catch(() => null);
+    }
+
+    if (action === "start") setIsRehearsing(true);
+    if (action === "stop" || action === "reset") setIsRehearsing(false);
+  };
 
   return (
     <AppShell>
@@ -139,22 +272,38 @@ function Ensayo() {
 
           <div className="bg-card border border-border/60 rounded-xl p-4 mt-6 flex flex-wrap items-center justify-between gap-4">
             <div className="text-xs">
-              <div className="flex items-center gap-1.5 text-success">
-                <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" /> Sesion
-                sincronizada
+              <div
+                className={`flex items-center gap-1.5 ${isConnected ? "text-success" : "text-muted-foreground"}`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${isConnected ? "bg-success animate-pulse" : "bg-muted-foreground"}`}
+                />{" "}
+                Teleprompter
               </div>
-              <div className="font-mono text-foreground mt-0.5">
-                {latest?.status === "active" ? "En curso" : "Demo"}
-              </div>
+              <div className="font-mono text-foreground mt-0.5">{connectionStatus}</div>
             </div>
             <div className="flex items-center gap-2">
               <ControlBtn icon={SkipBack} label="Retroceder linea" />
-              <ControlBtn icon={Pause} label="Pausar" />
-              <button className="w-14 h-14 rounded-full bg-primary-gradient text-primary-foreground grid place-items-center shadow-glow ring-4 ring-primary/20">
-                <Mic className="w-6 h-6" />
+              <ControlBtn
+                icon={Pause}
+                label="Pausar"
+                onClick={() => sendTeleprompterAction("stop")}
+                disabled={!canUseTeleprompter || !isRehearsing}
+              />
+              <button
+                onClick={() => sendTeleprompterAction(isRehearsing ? "stop" : "start")}
+                disabled={!canUseTeleprompter}
+                className="w-14 h-14 rounded-full bg-primary-gradient text-primary-foreground grid place-items-center shadow-glow ring-4 ring-primary/20 disabled:opacity-50 disabled:shadow-none"
+              >
+                {isRehearsing ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
               </button>
               <ControlBtn icon={SkipForward} label="Siguiente linea" />
-              <ControlBtn icon={RotateCcw} label="Reiniciar escena" />
+              <ControlBtn
+                icon={RotateCcw}
+                label="Reiniciar escena"
+                onClick={() => sendTeleprompterAction("reset")}
+                disabled={!canUseTeleprompter}
+              />
             </div>
             <div />
           </div>
@@ -171,11 +320,26 @@ function Ensayo() {
                   status={character.id === currentLine?.character_id ? "Activo" : "En espera"}
                   muted={character.id === selectedCharacter?.id}
                   playing={
-                    character.id === currentLine?.character_id &&
-                    character.id !== selectedCharacter?.id
+                    playingCharacter === character.name.toUpperCase() ||
+                    (character.id === currentLine?.character_id &&
+                      character.id !== selectedCharacter?.id &&
+                      !isMyTurn)
                   }
                 />
               ))}
+            </div>
+          </Card>
+
+          <Card title="Teleprompter en vivo">
+            <Quick label="Sesion FastAPI" value={teleprompterSessionId ? "Lista" : "Sin enlace"} />
+            <Quick label="Turno actual" value={isMyTurn ? "Tu turno" : "IA / escucha"} />
+            <div className="mt-3 rounded-lg border border-border/60 bg-surface p-3">
+              <div className="text-[10px] tracking-[0.2em] text-muted-foreground uppercase mb-1">
+                Transcripcion
+              </div>
+              <p className="text-xs leading-relaxed text-foreground min-h-10">
+                {liveTranscript || "Aun no hay transcripcion del microfono."}
+              </p>
             </div>
           </Card>
 
@@ -266,9 +430,23 @@ function LineCard({
   );
 }
 
-function ControlBtn({ icon: Icon, label }: { icon: typeof Mic; label: string }) {
+function ControlBtn({
+  icon: Icon,
+  label,
+  onClick,
+  disabled,
+}: {
+  icon: typeof Mic;
+  label: string;
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
   return (
-    <button className="flex flex-col items-center gap-1 px-3 py-2 rounded-lg border border-border/60 bg-surface hover:border-primary/40 hover:text-primary transition">
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="flex flex-col items-center gap-1 px-3 py-2 rounded-lg border border-border/60 bg-surface hover:border-primary/40 hover:text-primary transition disabled:opacity-50 disabled:hover:border-border/60 disabled:hover:text-inherit"
+    >
       <Icon className="w-4 h-4" />
       <span className="text-[10px] text-muted-foreground">{label}</span>
     </button>
@@ -338,4 +516,24 @@ function modeLabel(value: string) {
   if (value === "grupo") return "En grupo";
   if (value === "lectura") return "Lectura";
   return "Individual";
+}
+
+function findLineForSegment(lines: ScriptLineWithCharacter[], segment: TeleprompterSegment) {
+  const segmentText = normalizeText(segment.text);
+  return (
+    lines.find((line) => segmentText.includes(normalizeText(line.text))) ??
+    lines.find(
+      (line) =>
+        normalizeText(line.character?.name ?? "") === normalizeText(segment.character ?? ""),
+    ) ??
+    null
+  );
+}
+
+function normalizeText(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 }
