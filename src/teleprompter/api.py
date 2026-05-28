@@ -30,7 +30,7 @@ WHISPER_LANG  = os.getenv("WHISPER_LANG", "es")
 
 class AppState:
     def __init__(self):
-        self.db       = RecordingDB(DB_PATH)
+        self.db       = RecordingDB()
         self.tp       = WhisperTeleprompter(WHISPER_MODEL, WHISPER_LANG)
         self.recorder = CharacterRecorder(self.db)
         self.playback = PlaybackEngine()

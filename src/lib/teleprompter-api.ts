@@ -1,117 +1,54 @@
-import type { ScriptLineWithCharacter } from "@/lib/rehearsal-data";
+// src/lib/teleprompter-api.ts
 
-export type TeleprompterLoadTextResponse = {
-  characters: Record<string, number>;
-  total_segments: number;
-  text_length: number;
-};
+// Asegúrate de haber agregado VITE_TELEPROMPTER_API_URL en tu archivo .env
+const API_BASE_URL = import.meta.env.VITE_TELEPROMPTER_API_URL || "http://127.0.0.1:8000";
 
-export type TeleprompterSessionResponse = {
-  session_id: string;
-  my_character: string;
-  other_character: string;
-  created_at: string;
-};
-
-export type TeleprompterCoverageResponse = {
-  total_segments: number;
-  covered_segments: number;
-  coverage_pct: number;
-};
-
-export type TeleprompterSegment = {
-  character: string | null;
-  text: string;
-  start: number;
-  end: number;
-};
-
-export type TeleprompterWsEvent =
-  | { event: "status"; message: string }
-  | { event: "error"; message: string }
-  | { event: "transcription"; text: string; confidence: number; position: number }
-  | { event: "segment_change"; segment: TeleprompterSegment; is_my_turn: boolean }
-  | { event: "playback_start"; character: string }
-  | { event: "playback_finish"; character: string }
-  | { event: "missing_audio"; segment: TeleprompterSegment };
-
-const DEFAULT_BASE_URL = "http://127.0.0.1:8000";
-
-export function teleprompterApiUrl(path = "") {
-  const configured = import.meta.env.VITE_TELEPROMPTER_API_URL ?? DEFAULT_BASE_URL;
-  const base = String(configured).replace(/\/$/, "");
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return `${base}${normalizedPath}`;
-}
-
-export function teleprompterWsUrl(path: string) {
-  const url = new URL(teleprompterApiUrl(path));
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString();
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(teleprompterApiUrl(path), {
-    ...init,
+async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    ...options,
     headers: {
       "Content-Type": "application/json",
-      ...init?.headers,
+      ...options.headers,
     },
   });
 
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(body || `Teleprompter API respondio ${response.status}`);
+    const errorData = await response.json().catch(() => null);
+    throw new Error(errorData?.detail || `API Error: ${response.status} ${response.statusText}`);
   }
 
-  return response.json() as Promise<T>;
+  return response.json();
 }
 
-export function loadTeleprompterScriptText(text: string, language = "es") {
-  return request<TeleprompterLoadTextResponse>("/script/load/text", {
-    method: "POST",
-    body: JSON.stringify({ text, language }),
-  });
-}
-
-export function createTeleprompterSession({
-  scriptId,
-  myCharacter,
-  otherCharacter,
+// 1. Crear un nuevo ensayo
+export function createTeleprompterEnsayo({
+  idObra,
+  modoEnsayo,
 }: {
-  scriptId: string;
-  myCharacter: string;
-  otherCharacter: string;
+  idObra: number;
+  modoEnsayo: string;
 }) {
-  return request<TeleprompterSessionResponse>("/session", {
+  return request<{ id_ensayo: number; id_obra: number; modo_ensayo: string; fecha_hora: string }>("/ensayo", {
     method: "POST",
     body: JSON.stringify({
-      script_id: scriptId,
-      my_character: myCharacter,
-      other_character: otherCharacter,
+      id_obra: idObra,
+      modo_ensayo: modoEnsayo,
     }),
   });
 }
 
-export function getTeleprompterCoverage(sessionId: string) {
-  return request<TeleprompterCoverageResponse>(`/session/${sessionId}/coverage`);
+// 2. Iniciar la grabación
+export function startRecording(ensayoId: number) {
+  return request<{ message: string; recording_id: number }>("/recording/start", {
+    method: "POST",
+    body: JSON.stringify({ ensayo_id: ensayoId }),
+  });
 }
 
-export function buildTeleprompterScriptText({
-  title,
-  sceneTitle,
-  lines,
-}: {
-  title: string;
-  sceneTitle?: string | null;
-  lines: ScriptLineWithCharacter[];
-}) {
-  const chunks = [title, sceneTitle].filter(Boolean) as string[];
-
-  for (const line of lines) {
-    const characterName = line.character?.name?.trim() || "Narrador";
-    chunks.push(characterName.toUpperCase(), line.text.trim());
-  }
-
-  return chunks.join("\n").trim();
+// 3. Detener la grabación
+export function stopRecording(recordingId: number) {
+  return request<{ message: string; file_path: string }>("/recording/stop", {
+    method: "POST",
+    body: JSON.stringify({ recording_id: recordingId }),
+  });
 }

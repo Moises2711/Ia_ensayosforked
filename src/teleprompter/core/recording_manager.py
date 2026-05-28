@@ -1,12 +1,11 @@
 """
 recording_manager.py
-Capa de datos y grabación adaptada al nuevo esquema relacional SQLite.
+Capa de datos y grabación adaptada al nuevo esquema relacional en Supabase (PostgreSQL).
 """
 
 from __future__ import annotations
 
 import os
-import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +16,11 @@ import numpy as np
 import pyaudio
 import sounddevice as sd
 import soundfile as sf
+from dotenv import load_dotenv
+from supabase import create_client, Client
+
+# Cargar variables del entorno (.env) automáticamente
+load_dotenv()
 
 # ── Constantes de audio ───────────────────────────────────────────────────────
 SAMPLE_RATE    = 16_000
@@ -55,134 +59,114 @@ class LineaDialogo:
     emocion_base: str
 
 @dataclass
-class Grabacion:
-    id_grabacion: int
-    id_linea: int
-    id_actor: int
-    ruta_archivo_audio: str
-    es_toma_activa: bool
-
-@dataclass
 class Ensayo:
-    id_ensayo: int
-    id_obra: int
+    id_ensayo: str
+    id_obra: str
     modo_ensayo: str
     fecha_hora: str
 
+@dataclass
+class Grabacion:
+    id_grabacion: str
+    id_linea: str
+    id_actor: str
+    ruta_archivo_audio: str
+    es_toma_activa: bool
 
-# ── Base de datos ─────────────────────────────────────────────────────────────
+# (Haz lo mismo para Actor, Obra, Personaje y LineaDialogo si las usas)
+
+
+# ── Base de datos (Supabase) ──────────────────────────────────────────────────
 class RecordingDB:
-    def __init__(self, db_path: str = "teleprompter.db"):
-        self.db_path = db_path
-        self._ensure_tables()
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = 1") # Activar restricciones de llaves foráneas
-        return conn
-
-    def _ensure_tables(self):
-        with self._connect() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS ACTOR (
-                    id_actor INTEGER PRIMARY KEY AUTOINCREMENT,
-                    Nombre TEXT NOT NULL,
-                    Perfil_voz TEXT,
-                    Estilo_interpretativo TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS OBRA (
-                    id_obra INTEGER PRIMARY KEY AUTOINCREMENT,
-                    Titulo TEXT NOT NULL,
-                    Texto_guion TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS PERSONAJE (
-                    id_personaje INTEGER PRIMARY KEY AUTOINCREMENT,
-                    id_obra INTEGER NOT NULL,
-                    Nombre TEXT NOT NULL,
-                    FOREIGN KEY (id_obra) REFERENCES OBRA(id_obra)
-                );
-
-                CREATE TABLE IF NOT EXISTS ASIGNACION_ROL (
-                    id_asignacion INTEGER PRIMARY KEY AUTOINCREMENT,
-                    id_actor INTEGER NOT NULL,
-                    id_personaje INTEGER NOT NULL,
-                    Fecha_registro TEXT NOT NULL,
-                    FOREIGN KEY (id_actor) REFERENCES ACTOR(id_actor),
-                    FOREIGN KEY (id_personaje) REFERENCES PERSONAJE(id_personaje)
-                );
-
-                CREATE TABLE IF NOT EXISTS LINEA_DIALOGO (
-                    id_linea INTEGER PRIMARY KEY AUTOINCREMENT,
-                    id_personaje INTEGER NOT NULL,
-                    Orden_secuencia INTEGER NOT NULL,
-                    Texto_esperado TEXT NOT NULL,
-                    Emocion_base TEXT,
-                    FOREIGN KEY (id_personaje) REFERENCES PERSONAJE(id_personaje)
-                );
-
-                CREATE TABLE IF NOT EXISTS GRABACION (
-                    id_grabacion INTEGER PRIMARY KEY AUTOINCREMENT,
-                    id_linea INTEGER NOT NULL,
-                    id_actor INTEGER NOT NULL,
-                    Ruta_archivo_audio TEXT NOT NULL,
-                    Es_toma_activa BOOLEAN NOT NULL CHECK (Es_toma_activa IN (0, 1)),
-                    FOREIGN KEY (id_linea) REFERENCES LINEA_DIALOGO(id_linea),
-                    FOREIGN KEY (id_actor) REFERENCES ACTOR(id_actor)
-                );
-
-                CREATE TABLE IF NOT EXISTS ENSAYO (
-                    id_ensayo INTEGER PRIMARY KEY AUTOINCREMENT,
-                    id_obra INTEGER NOT NULL,
-                    Modo_ensayo TEXT NOT NULL,
-                    Fecha_hora TEXT NOT NULL,
-                    FOREIGN KEY (id_obra) REFERENCES OBRA(id_obra)
-                );
-                """
-            )
-
-    # ── Métodos CRUD Básicos ──────────────────────────────────────────────────
-    def iniciar_ensayo(self, id_obra: int, modo_ensayo: str) -> Ensayo:
-        with self._connect() as conn:
-            cursor = conn.execute(
-                "INSERT INTO ENSAYO (id_obra, Modo_ensayo, Fecha_hora) VALUES (?, ?, ?)",
-                (id_obra, modo_ensayo, datetime.now().isoformat())
-            )
-            id_ensayo = cursor.lastrowid
+    def __init__(self):
+        # Lee las variables del entorno. Soporta el formato estándar y el de VITE_
+        url: str = os.environ.get("SUPABASE_URL") or os.environ.get("VITE_SUPABASE_URL")
+        key: str = os.environ.get("SUPABASE_PUBLISHABLE_KEY") or os.environ.get("VITE_SUPABASE_PUBLISHABLE_KEY")
+        
+        if not url or not key:
+            raise ValueError("Faltan credenciales de Supabase en las variables de entorno.")
             
-        return Ensayo(id_ensayo=id_ensayo, id_obra=id_obra, modo_ensayo=modo_ensayo, fecha_hora=datetime.now().isoformat())
+        self.supabase: Client = create_client(url, key)
 
-    def get_ensayo(self, id_ensayo: int) -> Optional[Ensayo]:
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM ENSAYO WHERE id_ensayo = ?", (id_ensayo,)).fetchone()
-        return Ensayo(**dict(row)) if row else None
-
-    def guardar_toma_audio(self, id_linea: int, id_actor: int, ruta_audio: str) -> Grabacion:
-        with self._connect() as conn:
-            # Desactivar tomas anteriores para que solo la nueva sea la activa
-            conn.execute("UPDATE GRABACION SET Es_toma_activa = 0 WHERE id_linea = ?", (id_linea,))
+# ── Métodos CRUD ──────────────────────────────────────────────────────────
+    def iniciar_ensayo(self, id_obra: str, modo_ensayo: str) -> Ensayo:
+        fecha_hora = datetime.now().isoformat()
+        
+        data = {
+            "id_obra": id_obra,
+            "modo_ensayo": modo_ensayo,
+            "fecha_hora": fecha_hora
+        }
+        
+        # Tabla en minúsculas
+        response = self.supabase.table("ensayo").insert(data).execute()
+        
+        if not response.data:
+            raise Exception("No se pudo crear el ensayo en Supabase")
             
-            cursor = conn.execute(
-                """
-                INSERT INTO GRABACION (id_linea, id_actor, Ruta_archivo_audio, Es_toma_activa)
-                VALUES (?, ?, ?, 1)
-                """,
-                (id_linea, id_actor, ruta_audio)
-            )
-            id_grabacion = cursor.lastrowid
-            
-        return Grabacion(id_grabacion=id_grabacion, id_linea=id_linea, id_actor=id_actor, ruta_archivo_audio=ruta_audio, es_toma_activa=True)
+        row = response.data[0]
+        return Ensayo(
+            id_ensayo=row["id_ensayo"], 
+            id_obra=row["id_obra"], 
+            modo_ensayo=row["modo_ensayo"], 
+            fecha_hora=row["fecha_hora"]
+        )
 
-    def obtener_grabacion_activa_por_linea(self, id_linea: int) -> Optional[Grabacion]:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM GRABACION WHERE id_linea = ? AND Es_toma_activa = 1", 
-                (id_linea,)
-            ).fetchone()
-        return Grabacion(**dict(row)) if row else None
+    def get_ensayo(self, id_ensayo: str) -> Optional[Ensayo]:
+        response = self.supabase.table("ensayo").select("*").eq("id_ensayo", id_ensayo).execute()
+        
+        if not response.data:
+            return None
+            
+        row = response.data[0]
+        return Ensayo(
+            id_ensayo=row["id_ensayo"], 
+            id_obra=row["id_obra"], 
+            modo_ensayo=row["modo_ensayo"], 
+            fecha_hora=row["fecha_hora"]
+        )
+
+    def guardar_toma_audio(self, id_linea: str, id_actor: str, ruta_audio: str) -> Grabacion:
+        # Desactivar tomas anteriores para esta línea
+        self.supabase.table("grabacion").update({"es_toma_activa": False}).eq("id_linea", id_linea).execute()
+        
+        # Insertar la nueva toma
+        data = {
+            "id_linea": id_linea,
+            "id_actor": id_actor,
+            "ruta_archivo_audio": ruta_audio,
+            "es_toma_activa": True
+        }
+        
+        response = self.supabase.table("grabacion").insert(data).execute()
+        
+        if not response.data:
+            raise Exception("No se pudo guardar la grabación en Supabase")
+            
+        row = response.data[0]
+        
+        return Grabacion(
+            id_grabacion=row["id_grabacion"],
+            id_linea=row["id_linea"],
+            id_actor=row["id_actor"],
+            ruta_archivo_audio=row["ruta_archivo_audio"],
+            es_toma_activa=row["es_toma_activa"]
+        )
+
+    def obtener_grabacion_activa_por_linea(self, id_linea: str) -> Optional[Grabacion]:
+        response = self.supabase.table("grabacion").select("*").eq("id_linea", id_linea).eq("es_toma_activa", True).execute()
+        
+        if not response.data:
+            return None
+            
+        row = response.data[0]
+        return Grabacion(
+            id_grabacion=row["id_grabacion"],
+            id_linea=row["id_linea"],
+            id_actor=row["id_actor"],
+            ruta_archivo_audio=row["ruta_archivo_audio"],
+            es_toma_activa=row["es_toma_activa"]
+        )
 
 
 # ── Grabador de personaje ─────────────────────────────────────────────────────
@@ -195,16 +179,16 @@ class CharacterRecorder:
         self._stop_evt = threading.Event()
         
         # Estado actual de grabación
-        self._id_ensayo: int = 0
-        self._id_actor: int = 0
-        self._id_linea: int = 0
+        self._id_ensayo: str = ""
+        self._id_actor: str = ""
+        self._id_linea: str = ""
         self._mic_index: Optional[int] = None
 
     @property
     def is_recording(self) -> bool:
         return self._recording
 
-    def start_recording(self, id_ensayo: int, id_actor: int, id_linea: int, mic_index: Optional[int] = None):
+    def start_recording(self, id_ensayo: str, id_actor: str, id_linea: str, mic_index: Optional[int] = None):
         if self._recording:
             raise RuntimeError("Ya hay una grabación en curso.")
             
@@ -234,7 +218,7 @@ class CharacterRecorder:
         audio_path = str(RECORDINGS_DIR / filename)
         sf.write(audio_path, audio, SAMPLE_RATE)
 
-        # Guarda en DB y retorna la nueva toma activa
+        # Guarda en DB (Supabase) y retorna la nueva toma activa
         return self.db.guardar_toma_audio(id_linea=self._id_linea, id_actor=self._id_actor, ruta_audio=audio_path)
 
     def _record_loop(self):
