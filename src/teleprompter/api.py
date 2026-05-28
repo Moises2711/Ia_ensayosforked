@@ -56,16 +56,16 @@ app.mount("/recordings", StaticFiles(directory=str(RECORDINGS_DIR)), name="recor
 # MODELOS PYDANTIC ACTUALIZADOS A IDs ENTEROS
 # ════════════════════════════════════════════════════════════════════════════
 
+# En api.py
 class EnsayoCreate(BaseModel):
-    id_obra: int
+    id_obra: str      # ¡Cambiado de int a str!
     modo_ensayo: str
 
 class RecordStart(BaseModel):
-    id_ensayo: int
-    id_actor: int
-    id_linea: int
+    id_ensayo: str    # ¡Cambiado de int a str!
+    id_actor: str     # ¡Cambiado de int a str!
+    id_linea: str     # ¡Cambiado de int a str!
     mic_index: Optional[int] = None
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # ENDPOINTS (Adaptados)
