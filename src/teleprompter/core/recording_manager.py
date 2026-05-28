@@ -33,28 +33,28 @@ RECORDINGS_DIR.mkdir(exist_ok=True)
 # ── Modelos de datos (Esquema Relacional) ─────────────────────────────────────
 @dataclass
 class Actor:
-    id_actor: int
+    id_actor: str
     nombre: str
     perfil_voz: str
     estilo_interpretativo: str
 
 @dataclass
 class Obra:
-    id_obra: int
+    id_obra: str
     titulo: str
     texto_guion: str
 
 @dataclass
 class Personaje:
-    id_personaje: int
-    id_obra: int
+    id_personaje: str
+    id_obra: str
     nombre: str
 
 @dataclass
 class LineaDialogo:
-    id_linea: int
-    id_personaje: int
-    orden_secuencia: int
+    id_linea: str
+    id_personaje: str
+    orden_secuencia: int # (El orden sí es número, se queda igual)
     texto_esperado: str
     emocion_base: str
 
@@ -255,14 +255,14 @@ class PlaybackEngine:
         self._playing = False
         self._thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
-        self.on_start: Optional[Callable[[int], None]] = None
-        self.on_finish: Optional[Callable[[int], None]] = None
+        self.on_start: Optional[Callable[[str], None]] = None
+        self.on_finish: Optional[Callable[[str], None]] = None
 
     @property
     def is_playing(self) -> bool:
         return self._playing
 
-    def play(self, audio_path: str, id_personaje: int = 0):
+    def play(self, audio_path: str, id_personaje: str = "0"):
         self.stop()
         self._stop_evt.clear()
         self._playing = True
@@ -278,7 +278,7 @@ class PlaybackEngine:
             if self._thread:
                 self._thread.join(timeout=2)
 
-    def _play_loop(self, audio_path: str, id_personaje: int):
+    def _play_loop(self, audio_path: str, id_personaje: str):
         try:
             data, sr = sf.read(audio_path, dtype="float32")
             if self.on_start:

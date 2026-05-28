@@ -1,34 +1,37 @@
-// src/lib/teleprompter-api.ts
+const DEFAULT_BASE_URL = "http://127.0.0.1:8000";
 
-// Asegúrate de haber agregado VITE_TELEPROMPTER_API_URL en tu archivo .env
-const API_BASE_URL = import.meta.env.VITE_TELEPROMPTER_API_URL || "http://127.0.0.1:8000";
+export function teleprompterApiUrl(path = "") {
+  const configured = import.meta.env.VITE_TELEPROMPTER_API_URL ?? DEFAULT_BASE_URL;
+  const base = String(configured).replace(/\/$/, "");
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${base}${normalizedPath}`;
+}
 
-async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    ...options,
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(teleprompterApiUrl(path), {
+    ...init,
     headers: {
       "Content-Type": "application/json",
-      ...options.headers,
+      ...init?.headers,
     },
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => null);
-    throw new Error(errorData?.detail || `API Error: ${response.status} ${response.statusText}`);
+    const body = await response.text();
+    throw new Error(body || `Teleprompter API respondió ${response.status}`);
   }
 
-  return response.json();
+  return response.json() as Promise<T>;
 }
 
-// 1. Crear un nuevo ensayo
 export function createTeleprompterEnsayo({
   idObra,
   modoEnsayo,
 }: {
-  idObra: number;
+  idObra: string;
   modoEnsayo: string;
 }) {
-  return request<{ id_ensayo: number; id_obra: number; modo_ensayo: string; fecha_hora: string }>("/ensayo", {
+  return request<{ id_ensayo: string; id_obra: string; modo_ensayo: string; fecha_hora: string }>("/ensayo", {
     method: "POST",
     body: JSON.stringify({
       id_obra: idObra,
@@ -37,18 +40,30 @@ export function createTeleprompterEnsayo({
   });
 }
 
-// 2. Iniciar la grabación
-export function startRecording(ensayoId: number) {
-  return request<{ message: string; recording_id: number }>("/recording/start", {
+export function startRecording({
+  idEnsayo,
+  idActor,
+  idLinea,
+  micIndex,
+}: {
+  idEnsayo: string;
+  idActor: string;
+  idLinea: string;
+  micIndex?: number;
+}) {
+  return request<{ status: string; id_linea: string }>("/recording/start", {
     method: "POST",
-    body: JSON.stringify({ ensayo_id: ensayoId }),
+    body: JSON.stringify({
+      id_ensayo: idEnsayo,
+      id_actor: idActor,
+      id_linea: idLinea,
+      mic_index: micIndex ?? null
+    }),
   });
 }
 
-// 3. Detener la grabación
-export function stopRecording(recordingId: number) {
-  return request<{ message: string; file_path: string }>("/recording/stop", {
+export function stopRecording() {
+  return request<{ id_grabacion: string; id_linea: string; id_actor: string; es_toma_activa: boolean; audio_url: string }>("/recording/stop", {
     method: "POST",
-    body: JSON.stringify({ recording_id: recordingId }),
   });
 }
