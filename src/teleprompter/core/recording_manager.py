@@ -98,18 +98,22 @@ class RecordingDB:
             "fecha_hora": fecha_hora
         }
         
-        # Tabla en minúsculas
-        response = self.supabase.table("ensayo").insert(data).execute()
+        # Cambiamos "ensayo" por "rehearsal_sessions"
+        response = self.supabase.table("rehearsal_sessions").insert({
+            "script_id": id_obra,  # Aquí mapeamos el ID de la obra al campo script_id
+            "mode": modo_ensayo,
+            "started_at": fecha_hora
+        }).execute()
         
         if not response.data:
             raise Exception("No se pudo crear el ensayo en Supabase")
             
         row = response.data[0]
         return Ensayo(
-            id_ensayo=row["id_ensayo"], 
-            id_obra=row["id_obra"], 
-            modo_ensayo=row["modo_ensayo"], 
-            fecha_hora=row["fecha_hora"]
+            id_ensayo=row["id"], 
+            id_obra=row["script_id"], 
+            modo_ensayo=row["mode"], 
+            fecha_hora=row["started_at"]
         )
 
     def get_ensayo(self, id_ensayo: str) -> Optional[Ensayo]:

@@ -26,10 +26,10 @@ import {
   updatePerfilUsuario,
   updateRehearsalSession,
 } from "@/lib/rehearsal-data";
+
+// IMPORTACIONES CORREGIDAS
 import {
-  buildTeleprompterScriptText,
-  createTeleprompterSession,
-  loadTeleprompterScriptText,
+  createTeleprompterEnsayo,
   teleprompterApiUrl,
 } from "@/lib/teleprompter-api";
 
@@ -79,6 +79,7 @@ function ConfigEnsayo() {
   const { data: setup, isLoading: setupLoading } = useQuery({
     queryKey: ["script-setup", selectedScriptId, selectedSceneId],
     queryFn: () => getScriptSetup(selectedScriptId || undefined, selectedSceneId || undefined),
+    enabled: selectedScriptId !== "",
   });
 
   useEffect(() => {
@@ -92,7 +93,9 @@ function ConfigEnsayo() {
   }, [profileData]);
 
   useEffect(() => {
-    if (!selectedScriptId && scripts[0]) setSelectedScriptId(scripts[0].id);
+    if (!selectedScriptId && scripts?.length > 0 && scripts[0]) {
+      setSelectedScriptId(scripts[0].id);
+    }
   }, [selectedScriptId, scripts]);
 
   useEffect(() => {
@@ -101,15 +104,16 @@ function ConfigEnsayo() {
   }, [setup?.scene]);
 
   useEffect(() => {
-    if (!setup?.characters.length) {
+    if (!setup?.characters?.length) {
       setSelectedCharacterId(null);
       return;
     }
     setSelectedCharacterId(
       (current) =>
         current ??
-        setup.characters.find((char) => char.actor_type === "user")?.id ??
-        setup.characters[0].id,
+        setup.characters.find((char) => char?.actor_type === "user")?.id ??
+        setup.characters[0]?.id ?? 
+        null,
     );
   }, [setup?.characters]);
 
@@ -134,17 +138,18 @@ function ConfigEnsayo() {
       if (!setup?.script || !setup.scene) {
         throw new Error("Selecciona un libreto y una escena.");
       }
-      if (!setup.lines.length) {
+      if (!setup.lines?.length) {
         throw new Error("La escena seleccionada no tiene lineas para sincronizar.");
       }
       if (!selectedCharacter) {
         throw new Error("Selecciona el personaje que vas a interpretar.");
       }
 
+      // 1. Crear la sesión en Supabase (Frontend)
       const rehearsal = await createRehearsalSession({
         scriptId: setup.script.id,
         sceneId: setup.scene.id,
-        selectedCharacterId,
+        selectedCharacterId: selectedCharacter.id,
         mode,
         aiDifficulty: diff,
         suggestEmotions: emo,
@@ -153,27 +158,17 @@ function ConfigEnsayo() {
         totalLines: setup.lines.length,
       });
 
+      // 2. LÓGICA CORREGIDA PARA FASTAPI
       try {
-        const text = buildTeleprompterScriptText({
-          title: setup.script.title,
-          sceneTitle: setup.scene.title,
-          lines: setup.lines,
-        });
-        const otherCharacter =
-          setup.characters.find((character) => character.id !== selectedCharacter.id) ??
-          selectedCharacter;
-
-        await loadTeleprompterScriptText(text, "es");
-        const teleprompterSession = await createTeleprompterSession({
-          scriptId: setup.script.id,
-          myCharacter: selectedCharacter.name,
-          otherCharacter: otherCharacter.name,
+        const teleprompterSession = await createTeleprompterEnsayo({
+          idObra: setup.script.id,
+          modoEnsayo: mode,
         });
 
         return updateRehearsalSession(rehearsal.id, {
-          teleprompter_session_id: teleprompterSession.session_id,
+          teleprompter_session_id: teleprompterSession.id_ensayo,
           teleprompter_status: "ready",
-          teleprompter_last_event: `Sesion FastAPI creada para ${teleprompterSession.my_character}`,
+          teleprompter_last_event: `Sesion FastAPI creada (Ensayo ID: ${teleprompterSession.id_ensayo})`,
         });
       } catch (error) {
         const message =
@@ -200,9 +195,10 @@ function ConfigEnsayo() {
   });
 
   const selectedMode = MODES.find((item) => item.value === mode) ?? MODES[0];
+  
   const selectedCharacter =
-    setup?.characters.find((character) => character.id === selectedCharacterId) ??
-    setup?.characters[0] ??
+    setup?.characters?.find((character) => character?.id === selectedCharacterId) ??
+    setup?.characters?.[0] ??
     null;
 
   return (
@@ -243,7 +239,7 @@ function ConfigEnsayo() {
                 label="Libreto"
                 value={selectedScriptId}
                 loading={scriptsLoading}
-                options={scripts.map((script) => ({
+                options={(scripts || []).filter(Boolean).map((script) => ({
                   value: script.id,
                   label: script.title,
                   sub: script.author ?? "Autor desconocido",
@@ -258,7 +254,7 @@ function ConfigEnsayo() {
                 label="Escena"
                 value={setup?.scene?.id ?? ""}
                 loading={setupLoading}
-                options={(setup?.scenes ?? []).map((scene) => ({
+                options={(setup?.scenes || []).filter(Boolean).map((scene) => ({
                   value: scene.id,
                   label: scene.title,
                   sub: scene.description ?? scene.location ?? "",
@@ -278,7 +274,7 @@ function ConfigEnsayo() {
             }
           >
             <div className="space-y-3">
-              {(setup?.characters ?? []).map((character) => {
+              {(setup?.characters || []).filter(Boolean).map((character) => {
                 const active = selectedCharacterId === character.id;
                 const tag = character.actor_type === "user" ? "Tu" : "IA";
 
@@ -294,7 +290,7 @@ function ConfigEnsayo() {
                   >
                     <div className="flex items-center gap-3 min-w-[140px]">
                       <div className="w-9 h-9 rounded-full bg-primary/15 grid place-items-center text-primary text-sm font-semibold">
-                        {character.name[0]}
+                        {character.name?.[0] || "?"}
                       </div>
                       <div>
                         <div className="text-sm flex items-center gap-1.5">
@@ -412,13 +408,13 @@ function ConfigEnsayo() {
           <p className="text-sm mb-4">{setup?.scene?.title ?? "Sin escena"}</p>
 
           <p className="text-[10px] tracking-[0.25em] text-muted-foreground mb-2">
-            PERSONAJES ({setup?.characters.length ?? 0})
+            PERSONAJES ({setup?.characters?.length ?? 0})
           </p>
           <div className="space-y-2 mb-4">
-            {(setup?.characters ?? []).slice(0, 4).map((character) => (
+            {(setup?.characters || []).filter(Boolean).slice(0, 4).map((character) => (
               <div key={character.id} className="flex items-center gap-2 text-sm">
                 <div className="w-7 h-7 rounded-full bg-primary/15 text-primary text-xs grid place-items-center">
-                  {character.name[0]}
+                  {character.name?.[0] || "?"}
                 </div>
                 <span className="flex-1">{character.name}</span>
                 <span
@@ -430,7 +426,7 @@ function ConfigEnsayo() {
             ))}
           </div>
           <button className="w-full text-xs text-primary border border-primary/30 rounded-md py-1.5 mb-5">
-            {setup?.lines.length ?? 0} lineas cargadas
+            {setup?.lines?.length ?? 0} lineas cargadas
           </button>
 
           <p className="text-[10px] tracking-[0.25em] text-muted-foreground mb-2">CONFIGURACION</p>

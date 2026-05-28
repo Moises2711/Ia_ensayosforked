@@ -272,7 +272,7 @@ export async function importScriptFromText(draft: ScriptImportDraft) {
 
   const parsedLines = parseImportedScriptLines(draft.rawText);
   if (parsedLines.length === 0) {
-    throw new Error("No se encontraron lineas de dialogo para importar.");
+    throw new Error("No se encontraron lineas de dialogo para importar. Verifica el formato del texto.");
   }
 
   const characterNames = Array.from(
@@ -280,6 +280,7 @@ export async function importScriptFromText(draft: ScriptImportDraft) {
   ) as string[];
   const now = new Date().toISOString();
 
+  // 1. INTENTO DE GUARDAR EL LIBRETO
   const { data: script, error: scriptError } = await supabase
     .from("scripts")
     .insert({
@@ -299,9 +300,14 @@ export async function importScriptFromText(draft: ScriptImportDraft) {
     .select("*")
     .single();
 
-  if (scriptError) throw scriptError;
+  // AQUÍ OBLIGAMOS A MOSTRAR EL ERROR REAL DE SUPABASE
+  if (scriptError) {
+    console.error("Detalle del error en Supabase (Scripts):", scriptError);
+    throw new Error(`Supabase Error (scripts): ${scriptError.message || scriptError.details}`);
+  }
 
   try {
+    // 2. INTENTO DE GUARDAR LA ESCENA
     const { data: scene, error: sceneError } = await supabase
       .from("scenes")
       .insert({
@@ -313,7 +319,7 @@ export async function importScriptFromText(draft: ScriptImportDraft) {
       .select("*")
       .single();
 
-    if (sceneError) throw sceneError;
+    if (sceneError) throw new Error(`Supabase Error (scenes): ${sceneError.message}`);
 
     const insertedCharacters = characterNames.length
       ? await insertCharactersForScript(script.id, characterNames)
@@ -322,6 +328,7 @@ export async function importScriptFromText(draft: ScriptImportDraft) {
       insertedCharacters.map((character) => [normalizeName(character.name), character.id]),
     );
 
+    // 3. INTENTO DE GUARDAR LAS LÍNEAS DE DIÁLOGO
     const lines: TablesInsert<"script_lines">[] = parsedLines.map((line, index) => ({
       scene_id: scene.id,
       character_id: line.characterName
@@ -333,10 +340,11 @@ export async function importScriptFromText(draft: ScriptImportDraft) {
     }));
 
     const { error: linesError } = await supabase.from("script_lines").insert(lines);
-    if (linesError) throw linesError;
+    if (linesError) throw new Error(`Supabase Error (script_lines): ${linesError.message}`);
 
     return script;
   } catch (error) {
+    // Si falla a la mitad, borramos lo que se alcanzó a crear
     await supabase.from("scripts").delete().eq("id", script.id).eq("user_id", user.id);
     throw error;
   }

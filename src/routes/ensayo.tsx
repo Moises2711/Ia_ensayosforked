@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -25,11 +25,9 @@ import {
   updateRehearsalSession,
   type ScriptLineWithCharacter,
 } from "@/lib/rehearsal-data";
-import {
-  teleprompterWsUrl,
-  type TeleprompterSegment,
-  type TeleprompterWsEvent,
-} from "@/lib/teleprompter-api";
+
+// NUEVAS IMPORTACIONES: API REST en lugar de WebSockets
+import { startRecording, stopRecording } from "@/lib/teleprompter-api";
 
 export const Route = createFileRoute("/ensayo")({
   component: Ensayo,
@@ -50,14 +48,9 @@ function Wave({ active }: { active?: boolean }) {
 }
 
 function Ensayo() {
-  const wsRef = useRef<WebSocket | null>(null);
-  const [connectionStatus, setConnectionStatus] = useState("Esperando sesion");
-  const [isConnected, setIsConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState("Esperando para iniciar...");
   const [isRehearsing, setIsRehearsing] = useState(false);
-  const [activeSegment, setActiveSegment] = useState<TeleprompterSegment | null>(null);
-  const [isMyTurn, setIsMyTurn] = useState(false);
-  const [liveTranscript, setLiveTranscript] = useState("");
-  const [playingCharacter, setPlayingCharacter] = useState<string | null>(null);
+  const [activeLineIndex, setActiveLineIndex] = useState(0);
 
   const { data: latest, isLoading: rehearsalLoading } = useQuery({
     queryKey: ["latest-rehearsal"],
@@ -66,135 +59,80 @@ function Ensayo() {
   const { data: setup, isLoading: setupLoading } = useQuery({
     queryKey: ["script-setup", latest?.script_id, latest?.scene_id],
     queryFn: () => getScriptSetup(latest?.script_id ?? undefined, latest?.scene_id ?? undefined),
+    enabled: Boolean(latest?.script_id),
   });
 
   const loading = rehearsalLoading || setupLoading;
   const lines = useMemo(() => setup?.lines ?? [], [setup?.lines]);
-  const matchedLine = useMemo(
-    () => (activeSegment ? findLineForSegment(lines, activeSegment) : null),
-    [activeSegment, lines],
-  );
-  const activeLineIndex = matchedLine ? lines.findIndex((line) => line.id === matchedLine.id) : 0;
-  const currentLine = matchedLine ?? lines[0] ?? null;
+  
+  // Líneas actual, siguiente y posterior
+  const currentLine = lines[activeLineIndex] ?? null;
   const nextLine = lines[activeLineIndex + 1] ?? null;
   const afterLine = lines[activeLineIndex + 2] ?? null;
+
   const selectedCharacter =
     latest?.selectedCharacter ??
     setup?.characters.find((item) => item.actor_type === "user") ??
     null;
-  const completed = Math.max(
-    latest?.completed_lines ?? 0,
-    activeLineIndex > 0 ? activeLineIndex : Math.min(1, lines.length),
-  );
+
+  const completed = Math.max(latest?.completed_lines ?? 0, activeLineIndex);
   const total = latest?.total_lines || lines.length || 1;
   const progress = Math.min(100, Math.round((completed / total) * 100));
   const teleprompterSessionId = latest?.teleprompter_session_id ?? null;
-  const canUseTeleprompter = Boolean(teleprompterSessionId && isConnected);
 
-  useEffect(() => {
-    if (!teleprompterSessionId) {
-      setConnectionStatus(
-        latest?.teleprompter_status === "error"
-          ? "Teleprompter con error"
-          : "Sin sesion de teleprompter",
-      );
-      setIsConnected(false);
+  const isMyTurn = currentLine?.character_id === selectedCharacter?.id;
+
+  // ─── NUEVA LÓGICA DE GRABACIÓN REST ─────────────────────────────
+  const handleToggleRecording = async () => {
+    if (!teleprompterSessionId || !selectedCharacter || !currentLine) {
+      toast.error("Faltan datos (Ensayo, Personaje o Línea) para grabar.");
       return;
     }
 
-    const ws = new WebSocket(teleprompterWsUrl(`/ws/rehearsal/${teleprompterSessionId}`));
-    wsRef.current = ws;
-    setConnectionStatus("Conectando teleprompter...");
-    setIsConnected(false);
-
-    ws.onopen = () => {
-      setIsConnected(true);
-      setConnectionStatus("Teleprompter conectado");
-    };
-
-    ws.onmessage = (event) => {
-      let message: TeleprompterWsEvent;
+    if (isRehearsing) {
       try {
-        message = JSON.parse(event.data) as TeleprompterWsEvent;
-      } catch {
-        setConnectionStatus("Respuesta invalida del teleprompter");
-        return;
+        setConnectionStatus("Procesando y guardando audio...");
+        setIsRehearsing(false);
+        await stopRecording();
+        setConnectionStatus(`Toma guardada para línea ${activeLineIndex + 1}`);
+        toast.success("Audio guardado exitosamente");
+
+        // Auto-avanzar a la siguiente línea si existe
+        if (activeLineIndex < lines.length - 1) {
+          setActiveLineIndex((prev) => prev + 1);
+        }
+      } catch (error) {
+        toast.error("Error al detener grabación. ¿Está corriendo FastAPI?");
+        setConnectionStatus("Error de conexión");
       }
-
-      if (message.event === "status") {
-        if (message.message !== "keepalive") setConnectionStatus(message.message);
-        if (message.message.toLowerCase().includes("iniciado")) setIsRehearsing(true);
-        if (message.message.toLowerCase().includes("detenido")) setIsRehearsing(false);
-        return;
+    } else {
+      try {
+        setConnectionStatus("Grabando micrófono... (Habla ahora)");
+        setIsRehearsing(true);
+        await startRecording({
+          idEnsayo: teleprompterSessionId,
+          idActor: selectedCharacter.id,
+          idLinea: currentLine.id,
+        });
+      } catch (error) {
+        setIsRehearsing(false);
+        toast.error("Error al iniciar grabación. Revisa tu backend en Python.");
+        setConnectionStatus("Error al conectar con Python");
       }
-
-      if (message.event === "error") {
-        setConnectionStatus(message.message);
-        toast.error(message.message);
-        return;
-      }
-
-      if (message.event === "transcription") {
-        setLiveTranscript(message.text);
-        return;
-      }
-
-      if (message.event === "segment_change") {
-        setActiveSegment(message.segment);
-        setIsMyTurn(message.is_my_turn);
-        return;
-      }
-
-      if (message.event === "playback_start") {
-        setPlayingCharacter(message.character);
-        return;
-      }
-
-      if (message.event === "playback_finish") {
-        setPlayingCharacter(null);
-        return;
-      }
-
-      if (message.event === "missing_audio") {
-        setConnectionStatus(`Falta audio para ${message.segment.character ?? "este segmento"}`);
-      }
-    };
-
-    ws.onerror = () => {
-      setConnectionStatus("No se pudo conectar con FastAPI");
-      setIsConnected(false);
-    };
-
-    ws.onclose = () => {
-      setIsConnected(false);
-      setIsRehearsing(false);
-      setPlayingCharacter(null);
-      if (wsRef.current === ws) wsRef.current = null;
-    };
-
-    return () => {
-      ws.close();
-    };
-  }, [latest?.teleprompter_status, teleprompterSessionId]);
-
-  const sendTeleprompterAction = (action: "start" | "stop" | "reset") => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      toast.error("El teleprompter no esta conectado. Revisa que FastAPI este encendido.");
-      return;
     }
+  };
 
-    wsRef.current.send(JSON.stringify({ action }));
+  const handleSkipForward = () => {
+    setActiveLineIndex((prev) => Math.min(lines.length - 1, prev + 1));
+  };
 
-    if (latest?.id) {
-      const status = action === "start" ? "running" : action === "stop" ? "stopped" : "ready";
-      updateRehearsalSession(latest.id, {
-        teleprompter_status: status,
-        teleprompter_last_event: `Accion enviada: ${action}`,
-      }).catch(() => null);
-    }
+  const handleSkipBackward = () => {
+    setActiveLineIndex((prev) => Math.max(0, prev - 1));
+  };
 
-    if (action === "start") setIsRehearsing(true);
-    if (action === "stop" || action === "reset") setIsRehearsing(false);
+  const handleReset = () => {
+    setActiveLineIndex(0);
+    setConnectionStatus("Escena reiniciada.");
   };
 
   return (
@@ -272,38 +210,27 @@ function Ensayo() {
 
           <div className="bg-card border border-border/60 rounded-xl p-4 mt-6 flex flex-wrap items-center justify-between gap-4">
             <div className="text-xs">
-              <div
-                className={`flex items-center gap-1.5 ${isConnected ? "text-success" : "text-muted-foreground"}`}
-              >
-                <span
-                  className={`w-1.5 h-1.5 rounded-full ${isConnected ? "bg-success animate-pulse" : "bg-muted-foreground"}`}
-                />{" "}
-                Teleprompter
+              <div className="flex items-center gap-1.5 text-success">
+                <span className={`w-1.5 h-1.5 rounded-full ${isRehearsing ? "bg-destructive animate-pulse" : "bg-success"}`} />{" "}
+                Teleprompter {isRehearsing ? "(Grabando)" : "(Listo)"}
               </div>
               <div className="font-mono text-foreground mt-0.5">{connectionStatus}</div>
             </div>
             <div className="flex items-center gap-2">
-              <ControlBtn icon={SkipBack} label="Retroceder linea" />
-              <ControlBtn
-                icon={Pause}
-                label="Pausar"
-                onClick={() => sendTeleprompterAction("stop")}
-                disabled={!canUseTeleprompter || !isRehearsing}
-              />
+              <ControlBtn icon={SkipBack} label="Retroceder linea" onClick={handleSkipBackward} />
               <button
-                onClick={() => sendTeleprompterAction(isRehearsing ? "stop" : "start")}
-                disabled={!canUseTeleprompter}
-                className="w-14 h-14 rounded-full bg-primary-gradient text-primary-foreground grid place-items-center shadow-glow ring-4 ring-primary/20 disabled:opacity-50 disabled:shadow-none"
+                onClick={handleToggleRecording}
+                disabled={!teleprompterSessionId}
+                className={`w-14 h-14 rounded-full grid place-items-center shadow-glow ring-4 disabled:opacity-50 disabled:shadow-none transition-all ${
+                  isRehearsing 
+                    ? "bg-destructive text-destructive-foreground ring-destructive/20" 
+                    : "bg-primary-gradient text-primary-foreground ring-primary/20"
+                }`}
               >
-                {isRehearsing ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+                {isRehearsing ? <Square className="w-5 h-5 fill-current" /> : <Mic className="w-6 h-6" />}
               </button>
-              <ControlBtn icon={SkipForward} label="Siguiente linea" />
-              <ControlBtn
-                icon={RotateCcw}
-                label="Reiniciar escena"
-                onClick={() => sendTeleprompterAction("reset")}
-                disabled={!canUseTeleprompter}
-              />
+              <ControlBtn icon={SkipForward} label="Siguiente linea" onClick={handleSkipForward} />
+              <ControlBtn icon={RotateCcw} label="Reiniciar" onClick={handleReset} />
             </div>
             <div />
           </div>
@@ -319,26 +246,23 @@ function Ensayo() {
                   name={`${character.name}${character.id === selectedCharacter?.id ? " (Tu)" : " (IA)"}`}
                   status={character.id === currentLine?.character_id ? "Activo" : "En espera"}
                   muted={character.id === selectedCharacter?.id}
-                  playing={
-                    playingCharacter === character.name.toUpperCase() ||
-                    (character.id === currentLine?.character_id &&
-                      character.id !== selectedCharacter?.id &&
-                      !isMyTurn)
-                  }
+                  playing={isRehearsing && character.id === currentLine?.character_id}
                 />
               ))}
             </div>
           </Card>
 
           <Card title="Teleprompter en vivo">
-            <Quick label="Sesion FastAPI" value={teleprompterSessionId ? "Lista" : "Sin enlace"} />
+            <Quick label="Sesion FastAPI" value={teleprompterSessionId ? "Conectado" : "Desconectado"} />
             <Quick label="Turno actual" value={isMyTurn ? "Tu turno" : "IA / escucha"} />
             <div className="mt-3 rounded-lg border border-border/60 bg-surface p-3">
               <div className="text-[10px] tracking-[0.2em] text-muted-foreground uppercase mb-1">
-                Transcripcion
+                Estado
               </div>
               <p className="text-xs leading-relaxed text-foreground min-h-10">
-                {liveTranscript || "Aun no hay transcripcion del microfono."}
+                {isRehearsing 
+                  ? "Grabando... Cuando termines tu línea, presiona Stop para avanzar." 
+                  : "Presiona el micrófono para iniciar la grabación de la línea actual."}
               </p>
             </div>
           </Card>
@@ -351,25 +275,10 @@ function Ensayo() {
               </span>
             </div>
             <div className="h-1.5 rounded-full bg-surface overflow-hidden">
-              <div className="h-full bg-primary-gradient" style={{ width: `${progress}%` }} />
+              <div className="h-full bg-primary-gradient transition-all duration-300" style={{ width: `${progress}%` }} />
             </div>
           </Card>
-
-          <Card title="Configuracion rapida">
-            <Quick label="Nivel de realismo" value={difficultyLabel(latest?.ai_difficulty ?? 50)} />
-            <Quick label="Ritmo de ensayo" value={modeLabel(latest?.mode ?? "individual")} />
-            <Quick label="Pausa entre lineas" value={`${currentLine?.duration_seconds ?? 4} seg`} />
-            <button className="mt-2 w-full text-xs text-primary border border-primary/30 rounded-md py-2 inline-flex items-center justify-center gap-1.5">
-              <History className="w-3.5 h-3.5" /> Ir al inicio de la escena
-            </button>
-          </Card>
         </aside>
-      </div>
-
-      <div className="mt-8 text-center">
-        <Link to="/finalizado" className="text-xs text-muted-foreground hover:text-primary">
-          Ver pantalla de finalizacion sincronizada
-        </Link>
       </div>
     </AppShell>
   );
@@ -445,7 +354,7 @@ function ControlBtn({
     <button
       onClick={onClick}
       disabled={disabled}
-      className="flex flex-col items-center gap-1 px-3 py-2 rounded-lg border border-border/60 bg-surface hover:border-primary/40 hover:text-primary transition disabled:opacity-50 disabled:hover:border-border/60 disabled:hover:text-inherit"
+      className="flex flex-col items-center gap-1 px-3 py-2 rounded-lg border border-border/60 bg-surface hover:border-primary/40 hover:text-primary transition disabled:opacity-50 disabled:hover:border-border/60 disabled:hover:text-inherit cursor-pointer"
     >
       <Icon className="w-4 h-4" />
       <span className="text-[10px] text-muted-foreground">{label}</span>
@@ -499,9 +408,7 @@ function Quick({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between py-1.5 text-xs border-b border-border/40 last:border-0">
       <span className="text-muted-foreground">{label}</span>
-      <button className="inline-flex items-center gap-1 hover:text-primary">
-        {value} <ChevronDown className="w-3 h-3" />
-      </button>
+      <span className="font-medium text-right">{value}</span>
     </div>
   );
 }
@@ -516,24 +423,4 @@ function modeLabel(value: string) {
   if (value === "grupo") return "En grupo";
   if (value === "lectura") return "Lectura";
   return "Individual";
-}
-
-function findLineForSegment(lines: ScriptLineWithCharacter[], segment: TeleprompterSegment) {
-  const segmentText = normalizeText(segment.text);
-  return (
-    lines.find((line) => segmentText.includes(normalizeText(line.text))) ??
-    lines.find(
-      (line) =>
-        normalizeText(line.character?.name ?? "") === normalizeText(segment.character ?? ""),
-    ) ??
-    null
-  );
-}
-
-function normalizeText(value: string) {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim();
 }
