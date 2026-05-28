@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -82,6 +82,13 @@ function Ensayo() {
 
   const isMyTurn = currentLine?.character_id === selectedCharacter?.id;
 
+  // ─── PUNTO 2: Sincronizar línea actual con la BD al cargar ───
+  useEffect(() => {
+    if (latest?.completed_lines && latest.completed_lines > 0 && activeLineIndex === 0) {
+      setActiveLineIndex(latest.completed_lines);
+    }
+  }, [latest?.completed_lines]);
+
   // ─── NUEVA LÓGICA DE GRABACIÓN REST ─────────────────────────────
   const handleToggleRecording = async () => {
     if (!teleprompterSessionId || !selectedCharacter || !currentLine) {
@@ -97,11 +104,20 @@ function Ensayo() {
         setConnectionStatus(`Toma guardada para línea ${activeLineIndex + 1}`);
         toast.success("Audio guardado exitosamente");
 
-        // Auto-avanzar a la siguiente línea si existe
+        // PUNTO 1: Auto-avanzar a la siguiente línea y GUARDAR en base de datos
         if (activeLineIndex < lines.length - 1) {
-          setActiveLineIndex((prev) => prev + 1);
+          const nextIndex = activeLineIndex + 1;
+          setActiveLineIndex(nextIndex);
+          
+          // Guardamos el progreso. (Si TypeScript marca un error en "latest.id", 
+          // revisa si en tu base de datos se llama "latest.id_ensayo" o usa teleprompterSessionId)
+          if (latest?.id) {
+            updateRehearsalSession(latest.id, { completed_lines: nextIndex });
+          }
         }
       } catch (error) {
+        // PUNTO 3: Rollback si la petición a Python falla CORRECION JJJJJJJJJJJJJJJJJ
+        setIsRehearsing(true); 
         toast.error("Error al detener grabación. ¿Está corriendo FastAPI?");
         setConnectionStatus("Error de conexión");
       }
