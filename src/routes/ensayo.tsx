@@ -51,6 +51,9 @@ function Ensayo() {
   const [connectionStatus, setConnectionStatus] = useState("Esperando para iniciar...");
   const [isRehearsing, setIsRehearsing] = useState(false);
   const [activeLineIndex, setActiveLineIndex] = useState(0);
+  
+  // ─── NUEVO: Estado local para el ID de Python ───
+  const [localSessionId, setLocalSessionId] = useState<string | null>(null);
 
   const { data: latest, isLoading: rehearsalLoading } = useQuery({
     queryKey: ["latest-rehearsal"],
@@ -65,7 +68,6 @@ function Ensayo() {
   const loading = rehearsalLoading || setupLoading;
   const lines = useMemo(() => setup?.lines ?? [], [setup?.lines]);
   
-  // Líneas actual, siguiente y posterior
   const currentLine = lines[activeLineIndex] ?? null;
   const nextLine = lines[activeLineIndex + 1] ?? null;
   const afterLine = lines[activeLineIndex + 2] ?? null;
@@ -78,48 +80,47 @@ function Ensayo() {
   const completed = Math.max(latest?.completed_lines ?? 0, activeLineIndex);
   const total = latest?.total_lines || lines.length || 1;
   const progress = Math.min(100, Math.round((completed / total) * 100));
-  const teleprompterSessionId = latest?.teleprompter_session_id ?? null;
-
+  
   const isMyTurn = currentLine?.character_id === selectedCharacter?.id;
 
-  // ─── PUNTO 2: Sincronizar línea actual con la BD al cargar ───
+// ─── PUNTO 2: Sincronizar línea actual con la BD al cargar ───
   useEffect(() => {
     if (latest?.completed_lines && latest.completed_lines > 0 && activeLineIndex === 0) {
       setActiveLineIndex(latest.completed_lines);
     }
   }, [latest?.completed_lines]);
 
-  // ─── NUEVO: Inicializar sesión en FastAPI si no existe ───
+  // ─── NUEVO: Inicializar sesión en FastAPI (Memoria Local) ───
   useEffect(() => {
-    // Si ya cargaron los datos pero la base de datos no tiene un ID de sesión de teleprompter
-    if (latest?.id && latest?.script_id && !teleprompterSessionId && !loading) {
+    const scriptId = setup?.script?.id || latest?.script_id;
+
+    if (scriptId && !localSessionId && !loading) {
       const initSession = async () => {
         try {
           setConnectionStatus("Iniciando sesión en FastAPI...");
-
-          // 1. Le pedimos a FastAPI que inicie el ensayo
+          
           const res = await createTeleprompterEnsayo({
-            idObra: latest.script_id,
-            modoEnsayo: latest.mode || "individual"
+            idObra: scriptId,
+            modoEnsayo: latest?.mode || "individual"
           });
-
-          // 2. Guardamos el ID que nos dio Python en nuestra base de datos (Postgres)
-          await updateRehearsalSession(latest.id, { teleprompter_session_id: res.id_ensayo });
+          
+          // Lo guardamos directamente en React, sin pasar por Supabase
+          setLocalSessionId(res.id_ensayo);
           setConnectionStatus("Sesión lista para grabar.");
-
+          
         } catch (error) {
           console.error("Error al iniciar ensayo", error);
           setConnectionStatus("Error al crear sesión en Python.");
         }
       };
-
+      
       initSession();
     }
-  }, [latest?.id, latest?.script_id, teleprompterSessionId, loading, latest?.mode]);
+  }, [setup?.script?.id, latest?.script_id, localSessionId, loading, latest?.mode]);
 
   // ─── NUEVA LÓGICA DE GRABACIÓN REST ─────────────────────────────
   const handleToggleRecording = async () => {
-    if (!teleprompterSessionId || !selectedCharacter || !currentLine) {
+    if (!localSessionId || !selectedCharacter || !currentLine) {
       toast.error("Faltan datos (Ensayo, Personaje o Línea) para grabar.");
       return;
     }
@@ -132,19 +133,14 @@ function Ensayo() {
         setConnectionStatus(`Toma guardada para línea ${activeLineIndex + 1}`);
         toast.success("Audio guardado exitosamente");
 
-        // PUNTO 1: Auto-avanzar a la siguiente línea y GUARDAR en base de datos
         if (activeLineIndex < lines.length - 1) {
           const nextIndex = activeLineIndex + 1;
           setActiveLineIndex(nextIndex);
-          
-          // Guardamos el progreso. (Si TypeScript marca un error en "latest.id", 
-          // revisa si en tu base de datos se llama "latest.id_ensayo" o usa teleprompterSessionId)
           if (latest?.id) {
             updateRehearsalSession(latest.id, { completed_lines: nextIndex });
           }
         }
       } catch (error) {
-        // PUNTO 3: Rollback si la petición a Python falla CORRECION JJJJJJJJJJJJJJJJJ
         setIsRehearsing(true); 
         toast.error("Error al detener grabación. ¿Está corriendo FastAPI?");
         setConnectionStatus("Error de conexión");
@@ -154,7 +150,7 @@ function Ensayo() {
         setConnectionStatus("Grabando micrófono... (Habla ahora)");
         setIsRehearsing(true);
         await startRecording({
-          idEnsayo: teleprompterSessionId,
+          idEnsayo: localSessionId, // Usamos el ID local
           idActor: selectedCharacter.id,
           idLinea: currentLine.id,
         });
@@ -314,7 +310,7 @@ function Ensayo() {
           </Card>
 
           <Card title="Teleprompter en vivo">
-            <Quick label="Sesion FastAPI" value={teleprompterSessionId ? "Conectado" : "Desconectado"} />
+            <Quick label="Sesion FastAPI" value={localSessionId ? "Conectado" : "Desconectado"} />
             <Quick label="Turno actual" value={isMyTurn ? "Tu turno" : "IA / escucha"} />
             <div className="mt-3 rounded-lg border border-border/60 bg-surface p-3">
               <div className="text-[10px] tracking-[0.2em] text-muted-foreground uppercase mb-1">
