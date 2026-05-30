@@ -27,7 +27,7 @@ import {
 } from "@/lib/rehearsal-data";
 
 // NUEVAS IMPORTACIONES: API REST en lugar de WebSockets
-import { startRecording, stopRecording } from "@/lib/teleprompter-api";
+import { startRecording, stopRecording, createTeleprompterEnsayo } from "@/lib/teleprompter-api";
 
 export const Route = createFileRoute("/ensayo")({
   component: Ensayo,
@@ -89,6 +89,34 @@ function Ensayo() {
     }
   }, [latest?.completed_lines]);
 
+  // ─── NUEVO: Inicializar sesión en FastAPI si no existe ───
+  useEffect(() => {
+    // Si ya cargaron los datos pero la base de datos no tiene un ID de sesión de teleprompter
+    if (latest?.id && latest?.script_id && !teleprompterSessionId && !loading) {
+      const initSession = async () => {
+        try {
+          setConnectionStatus("Iniciando sesión en FastAPI...");
+
+          // 1. Le pedimos a FastAPI que inicie el ensayo
+          const res = await createTeleprompterEnsayo({
+            idObra: latest.script_id,
+            modoEnsayo: latest.mode || "individual"
+          });
+
+          // 2. Guardamos el ID que nos dio Python en nuestra base de datos (Postgres)
+          await updateRehearsalSession(latest.id, { teleprompter_session_id: res.id_ensayo });
+          setConnectionStatus("Sesión lista para grabar.");
+
+        } catch (error) {
+          console.error("Error al iniciar ensayo", error);
+          setConnectionStatus("Error al crear sesión en Python.");
+        }
+      };
+
+      initSession();
+    }
+  }, [latest?.id, latest?.script_id, teleprompterSessionId, loading, latest?.mode]);
+
   // ─── NUEVA LÓGICA DE GRABACIÓN REST ─────────────────────────────
   const handleToggleRecording = async () => {
     if (!teleprompterSessionId || !selectedCharacter || !currentLine) {
@@ -139,10 +167,12 @@ function Ensayo() {
   };
 
   const handleSkipForward = () => {
+    if (lines.length === 0) return; // Protección contra arrays vacíos
     setActiveLineIndex((prev) => Math.min(lines.length - 1, prev + 1));
   };
 
   const handleSkipBackward = () => {
+    if (lines.length === 0) return; // Protección contra arrays vacíos
     setActiveLineIndex((prev) => Math.max(0, prev - 1));
   };
 
@@ -233,7 +263,12 @@ function Ensayo() {
               <div className="font-mono text-foreground mt-0.5">{connectionStatus}</div>
             </div>
             <div className="flex items-center gap-2">
-              <ControlBtn icon={SkipBack} label="Retroceder linea" onClick={handleSkipBackward} />
+              <ControlBtn 
+                icon={SkipBack} 
+                label="Retroceder linea" 
+                onClick={handleSkipBackward} 
+                disabled={lines.length === 0 || isRehearsing} 
+              />
               <button
                 onClick={handleToggleRecording}
                 disabled={!teleprompterSessionId}
@@ -245,8 +280,18 @@ function Ensayo() {
               >
                 {isRehearsing ? <Square className="w-5 h-5 fill-current" /> : <Mic className="w-6 h-6" />}
               </button>
-              <ControlBtn icon={SkipForward} label="Siguiente linea" onClick={handleSkipForward} />
-              <ControlBtn icon={RotateCcw} label="Reiniciar" onClick={handleReset} />
+              <ControlBtn 
+                icon={SkipForward} 
+                label="Siguiente linea" 
+                onClick={handleSkipForward} 
+                disabled={lines.length === 0 || isRehearsing} 
+              />
+              <ControlBtn 
+                icon={RotateCcw} 
+                label="Reiniciar" 
+                onClick={handleReset} 
+                disabled={lines.length === 0 || isRehearsing} 
+              />
             </div>
             <div />
           </div>
