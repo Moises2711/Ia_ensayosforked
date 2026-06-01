@@ -121,29 +121,9 @@ class RecordingDB:
         )
 
     def guardar_toma_audio(self, id_linea: str, id_actor: str, ruta_audio: str, id_ensayo: str = "") -> Grabacion:
-        # Verificar que la línea existe en script_lines
-        linea = self.supabase.table("script_lines").select("*").eq("id", id_linea).execute()
-        if not linea.data:
-            raise Exception(f"Línea {id_linea} no encontrada en script_lines")
-
-        data = {
-            "user_id": id_actor,
-            "rehearsal_session_id": id_ensayo if id_ensayo else None,
-            "teleprompter_session_id": id_linea,
-            "character_name": "actor",
-            "segment_index": 0,
-            "segment_text": "",
-            "audio_url": ruta_audio,
-        }
-
-        response = self.supabase.table("rehearsal_recordings_metadata").insert(data).execute()
-
-        if not response.data:
-            raise Exception("No se pudo guardar la grabación")
-
-        row = response.data[0]
+        # Simplemente retornamos sin guardar en BD
         return Grabacion(
-            id_grabacion=row["id"],
+            id_grabacion="local",
             id_linea=id_linea,
             id_actor=id_actor,
             ruta_archivo_audio=ruta_audio,
