@@ -54,7 +54,7 @@ class Personaje:
 class LineaDialogo:
     id_linea: str
     id_personaje: str
-    orden_secuencia: int # (El orden sí es número, se queda igual)
+    orden_secuencia: int
     texto_esperado: str
     emocion_base: str
 
@@ -73,103 +73,96 @@ class Grabacion:
     ruta_archivo_audio: str
     es_toma_activa: bool
 
-# (Haz lo mismo para Actor, Obra, Personaje y LineaDialogo si las usas)
-
 
 # ── Base de datos (Supabase) ──────────────────────────────────────────────────
 class RecordingDB:
     def __init__(self):
-        # Lee las variables del entorno. Soporta el formato estándar y el de VITE_
         url: str = os.environ.get("SUPABASE_URL") or os.environ.get("VITE_SUPABASE_URL")
         key: str = os.environ.get("SUPABASE_PUBLISHABLE_KEY") or os.environ.get("VITE_SUPABASE_PUBLISHABLE_KEY")
-        
+
         if not url or not key:
             raise ValueError("Faltan credenciales de Supabase en las variables de entorno.")
-            
+
         self.supabase: Client = create_client(url, key)
 
-# ── Métodos CRUD ──────────────────────────────────────────────────────────
+    # ── Métodos CRUD ──────────────────────────────────────────────────────────
     def iniciar_ensayo(self, id_obra: str, modo_ensayo: str) -> Ensayo:
         fecha_hora = datetime.now().isoformat()
-        
-        data = {
-            "id_obra": id_obra,
-            "modo_ensayo": modo_ensayo,
-            "fecha_hora": fecha_hora
-        }
-        
-        # Cambiamos "ensayo" por "rehearsal_sessions"
+
         response = self.supabase.table("rehearsal_sessions").insert({
-            "script_id": id_obra,  # Aquí mapeamos el ID de la obra al campo script_id
+            "script_id": id_obra,
             "mode": modo_ensayo,
             "started_at": fecha_hora
         }).execute()
-        
+
         if not response.data:
             raise Exception("No se pudo crear el ensayo en Supabase")
-            
+
         row = response.data[0]
         return Ensayo(
-            id_ensayo=row["id"], 
-            id_obra=row["script_id"], 
-            modo_ensayo=row["mode"], 
+            id_ensayo=row["id"],
+            id_obra=row["script_id"],
+            modo_ensayo=row["mode"],
             fecha_hora=row["started_at"]
         )
 
     def get_ensayo(self, id_ensayo: str) -> Optional[Ensayo]:
-        response = self.supabase.table("ensayo").select("*").eq("id_ensayo", id_ensayo).execute()
-        
+        response = self.supabase.table("rehearsal_sessions").select("*").eq("id", id_ensayo).execute()
+
         if not response.data:
             return None
-            
+
         row = response.data[0]
         return Ensayo(
-            id_ensayo=row["id_ensayo"], 
-            id_obra=row["id_obra"], 
-            modo_ensayo=row["modo_ensayo"], 
-            fecha_hora=row["fecha_hora"]
+            id_ensayo=row["id"],
+            id_obra=row["script_id"],
+            modo_ensayo=row["mode"],
+            fecha_hora=row["started_at"]
         )
 
-    def guardar_toma_audio(self, id_linea: str, id_actor: str, ruta_audio: str) -> Grabacion:
-        # Desactivar tomas anteriores para esta línea
-        self.supabase.table("grabacion").update({"es_toma_activa": False}).eq("id_linea", id_linea).execute()
-        
-        # Insertar la nueva toma
+    def guardar_toma_audio(self, id_linea: str, id_actor: str, ruta_audio: str, id_ensayo: str = "") -> Grabacion:
+        # Verificar que la línea existe en script_lines
+        linea = self.supabase.table("script_lines").select("*").eq("id", id_linea).execute()
+        if not linea.data:
+            raise Exception(f"Línea {id_linea} no encontrada en script_lines")
+
         data = {
-            "id_linea": id_linea,
-            "id_actor": id_actor,
-            "ruta_archivo_audio": ruta_audio,
-            "es_toma_activa": True
+            "user_id": id_actor,
+            "rehearsal_session_id": id_ensayo if id_ensayo else None,
+            "teleprompter_session_id": id_linea,
+            "character_name": "actor",
+            "segment_index": 0,
+            "segment_text": "",
+            "audio_url": ruta_audio,
         }
-        
-        response = self.supabase.table("grabacion").insert(data).execute()
-        
+
+        response = self.supabase.table("rehearsal_recordings_metadata").insert(data).execute()
+
         if not response.data:
-            raise Exception("No se pudo guardar la grabación en Supabase")
-            
+            raise Exception("No se pudo guardar la grabación")
+
         row = response.data[0]
-        
         return Grabacion(
-            id_grabacion=row["id_grabacion"],
-            id_linea=row["id_linea"],
-            id_actor=row["id_actor"],
-            ruta_archivo_audio=row["ruta_archivo_audio"],
-            es_toma_activa=row["es_toma_activa"]
+            id_grabacion=row["id"],
+            id_linea=id_linea,
+            id_actor=id_actor,
+            ruta_archivo_audio=ruta_audio,
+            es_toma_activa=True
         )
 
     def obtener_grabacion_activa_por_linea(self, id_linea: str) -> Optional[Grabacion]:
-        response = self.supabase.table("grabacion").select("*").eq("id_linea", id_linea).eq("es_toma_activa", True).execute()
-        
+        response = self.supabase.table("rehearsal_recordings_metadata").select("*").eq("teleprompter_session_id", id_linea).execute()
+
         if not response.data:
             return None
-            
+
         row = response.data[0]
         return Grabacion(
-            id_grabacion=row["id_grabacion"],
-            id_linea=row["id_linea"],
-            id_actor=row["id_actor"],
-            ruta_archivo_audio=row["ruta_archivo_audio"],
-            es_toma_activa=row["es_toma_activa"]
+            id_grabacion=row["id"],
+            id_linea=id_linea,
+            id_actor=row["user_id"],
+            ruta_archivo_audio=row.get("audio_url", ""),
+            es_toma_activa=True
         )
 
 
@@ -181,7 +174,7 @@ class CharacterRecorder:
         self._frames: list[np.ndarray] = []
         self._thread: Optional[threading.Thread] = None
         self._stop_evt = threading.Event()
-        
+
         # Estado actual de grabación
         self._id_ensayo: str = ""
         self._id_actor: str = ""
@@ -195,7 +188,7 @@ class CharacterRecorder:
     def start_recording(self, id_ensayo: str, id_actor: str, id_linea: str, mic_index: Optional[int] = None):
         if self._recording:
             raise RuntimeError("Ya hay una grabación en curso.")
-            
+
         self._id_ensayo = id_ensayo
         self._id_actor = id_actor
         self._id_linea = id_linea
@@ -217,13 +210,17 @@ class CharacterRecorder:
             return None
 
         audio = np.concatenate(self._frames)
-        # Nomenclatura del archivo de audio con IDs numéricos
         filename = f"ensayo{self._id_ensayo}_actor{self._id_actor}_linea{self._id_linea}.wav"
         audio_path = str(RECORDINGS_DIR / filename)
         sf.write(audio_path, audio, SAMPLE_RATE)
 
-        # Guarda en DB (Supabase) y retorna la nueva toma activa
-        return self.db.guardar_toma_audio(id_linea=self._id_linea, id_actor=self._id_actor, ruta_audio=audio_path)
+        # Pasa el id_ensayo correctamente
+        return self.db.guardar_toma_audio(
+            id_linea=self._id_linea,
+            id_actor=self._id_actor,
+            ruta_audio=audio_path,
+            id_ensayo=self._id_ensayo
+        )
 
     def _record_loop(self):
         p = pyaudio.PyAudio()

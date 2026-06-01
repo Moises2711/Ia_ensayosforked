@@ -267,7 +267,7 @@ function Ensayo() {
               />
               <button
                 onClick={handleToggleRecording}
-                disabled={!teleprompterSessionId}
+                disabled={!localSessionId}
                 className={`w-14 h-14 rounded-full grid place-items-center shadow-glow ring-4 disabled:opacity-50 disabled:shadow-none transition-all ${
                   isRehearsing 
                     ? "bg-destructive text-destructive-foreground ring-destructive/20" 
