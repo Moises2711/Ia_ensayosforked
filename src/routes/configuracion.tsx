@@ -6,12 +6,11 @@ import { AppShell } from "@/components/AppShell";
 import { TopBar } from "@/components/TopBar";
 import { Mic, Volume2, Bell, Shield, Download, Save, User } from "lucide-react";
 import { getPerfilUsuario, updatePerfilUsuario } from "@/lib/rehearsal-data";
+import { useSpeechVoices, getDefaultVoiceName } from "@/lib/useSpeechVoices";
 
 export const Route = createFileRoute("/configuracion")({
   component: Configuracion,
 });
-
-const VOICES = ["Sofia (Femenina)", "Diego (Masculina)", "Valeria (Neutra)", "Tu voz"];
 const MODES = [
   ["individual", "Individual"],
   ["grupo", "En grupo"],
@@ -31,35 +30,36 @@ function Configuracion() {
   });
   const profile = data?.profile;
   const [displayName, setDisplayName] = useState("");
-  const [preferredVoice, setPreferredVoice] = useState(VOICES[0]);
+  const spanishVoices = useSpeechVoices();
+  const [preferredVoice, setPreferredVoice] = useState("");
   const [mode, setMode] = useState("individual");
   const [difficulty, setDifficulty] = useState(50);
   const [notifications, setNotifications] = useState(true);
   const [offline, setOffline] = useState(false);
-  const [privacy, setPrivacy] = useState("privado");
+  const [privacy, setPrivacy] = useState(
+    () => localStorage.getItem("prefs_privacy") ?? "privado",
+  );
+
+  // Cuando llegan las voces del sistema, pre-seleccionar la primera femenina en español
+  useEffect(() => {
+    if (spanishVoices.length > 0 && preferredVoice === "") {
+      setPreferredVoice(getDefaultVoiceName("female", spanishVoices));
+    }
+  }, [spanishVoices, preferredVoice]);
 
   useEffect(() => {
     if (!profile) return;
-    setDisplayName(profile.display_name ?? "");
-    setPreferredVoice(profile.preferred_voice);
-    setMode(profile.rehearsal_mode);
-    setDifficulty(profile.ai_difficulty);
-    setNotifications(profile.notifications_enabled);
-    setOffline(profile.offline_mode_enabled);
-    setPrivacy(profile.privacy_level);
+    setDisplayName(profile.display_name ?? profile.nombre_usuario ?? "");
   }, [profile]);
 
   const saveProfile = useMutation({
-    mutationFn: () =>
-      updatePerfilUsuario({
+    mutationFn: () => {
+      localStorage.setItem("prefs_privacy", privacy);
+      return updatePerfilUsuario({
         display_name: displayName,
-        preferred_voice: preferredVoice,
-        rehearsal_mode: mode,
-        ai_difficulty: difficulty,
-        notifications_enabled: notifications,
-        offline_mode_enabled: offline,
-        privacy_level: privacy,
-      }),
+        nombre_usuario: displayName,
+      });
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["perfil-usuario"] });
       toast.success("Perfil sincronizado");
@@ -127,7 +127,21 @@ function Configuracion() {
                 icon={Volume2}
                 title="Voz predeterminada"
                 value={preferredVoice}
-                options={VOICES.map((voice) => [voice, voice] as const)}
+                options={
+                  spanishVoices.length > 0
+                    ? spanishVoices.map(
+                        (sv) =>
+                          [
+                            sv.voice.name,
+                            sv.gender === "female"
+                              ? `${sv.voice.name} (F)`
+                              : sv.gender === "male"
+                                ? `${sv.voice.name} (M)`
+                                : sv.voice.name,
+                          ] as const,
+                      )
+                    : ([["", "Cargando voces..."] as const] as readonly (readonly [string, string])[])
+                }
                 onChange={setPreferredVoice}
               />
               <SelectBlock

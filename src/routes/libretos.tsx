@@ -43,6 +43,7 @@ import {
   updateScript,
   type ScriptRecord,
 } from "@/lib/rehearsal-data";
+import { getScriptsDeGrupos, getScriptDetailsForGrupo } from "@/lib/grupos-api";
 
 export const Route = createFileRoute("/libretos")({
   component: Libretos,
@@ -51,6 +52,7 @@ export const Route = createFileRoute("/libretos")({
 const TABS = ["Todos", "Mis libretos", "Favoritos", "Papelera"] as const;
 type Tab = (typeof TABS)[number];
 type SortMode = "recent" | "title" | "author";
+type ScriptConFuente = ScriptRecord & { fromGrupoNombre?: string; fromGrupoId?: string };
 
 function getScriptIcon(script: Pick<ScriptRecord, "title" | "genre"> | null) {
   const text = `${script?.title ?? ""} ${script?.genre ?? ""}`.toLowerCase();
@@ -71,6 +73,7 @@ function Libretos() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [showCharacters, setShowCharacters] = useState(false);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState({
     title: "",
     author: "",
@@ -93,14 +96,25 @@ function Libretos() {
     queryFn: () => getScripts({ includeDeleted: true }),
   });
 
+  const { data: grupoScripts = [] } = useQuery({
+    queryKey: ["scripts-de-grupos"],
+    queryFn: getScriptsDeGrupos,
+  });
+
+  const allScripts = useMemo((): ScriptConFuente[] => {
+    const ownIds = new Set(scripts.map((s) => s.id));
+    const fromGroups: ScriptConFuente[] = grupoScripts.filter((gs) => !ownIds.has(gs.id));
+    return [...scripts, ...fromGroups];
+  }, [scripts, grupoScripts]);
+
   const filteredScripts = useMemo(() => {
     const value = query.trim().toLowerCase();
 
-    return scripts
+    return allScripts
       .filter((script) => {
         const deleted = Boolean(script.deleted_at);
 
-        if (activeTab === "Papelera") return deleted;
+        if (activeTab === "Papelera") return deleted && !script.fromGrupoNombre;
         if (deleted) return false;
         if (activeTab === "Mis libretos")
           return Boolean(currentUserId && script.user_id === currentUserId);
@@ -119,7 +133,7 @@ function Libretos() {
         if (sortMode === "author") return (a.author ?? "").localeCompare(b.author ?? "");
         return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
       });
-  }, [activeTab, currentUserId, query, scripts, sortMode]);
+  }, [activeTab, currentUserId, query, allScripts, sortMode]);
 
   const selectedScript =
     filteredScripts.find((script) => script.id === selectedId) ??
@@ -128,8 +142,12 @@ function Libretos() {
     null;
 
   const { data: details } = useQuery({
-    queryKey: ["script-details", selectedScript?.id],
-    queryFn: () => getScriptDetails(selectedScript!.id),
+    queryKey: ["script-details", selectedScript?.id, selectedScript?.fromGrupoId],
+    queryFn: () => {
+      const s = selectedScript!;
+      if (s.fromGrupoId) return getScriptDetailsForGrupo(s.id, s.fromGrupoId);
+      return getScriptDetails(s.id);
+    },
     enabled: Boolean(selectedScript),
   });
 
@@ -251,6 +269,35 @@ function Libretos() {
       toast.error(error instanceof Error ? error.message : "No se pudo eliminar definitivamente"),
   });
 
+  async function extractTextFromPdf(file: File): Promise<string> {
+    if (typeof window === "undefined") throw new Error("PDF solo disponible en el browser.");
+    const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist");
+    GlobalWorkerOptions.workerSrc = new URL(
+      "pdfjs-dist/build/pdf.worker.min.mjs",
+      import.meta.url,
+    ).toString();
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await getDocument({ data: arrayBuffer }).promise;
+    const pages: string[] = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      let pageText = "";
+      for (const item of content.items) {
+        if (!("str" in item)) continue;
+        // Agregar espacio entre items si el texto acumulado no termina en espacio/salto
+        if (pageText && !pageText.endsWith("\n") && !pageText.endsWith(" ") && !item.str.startsWith(" ")) {
+          pageText += " ";
+        }
+        pageText += item.str;
+        // hasEOL indica que este item es el último de su línea visual
+        if ((item as { hasEOL?: boolean }).hasEOL) pageText += "\n";
+      }
+      pages.push(pageText.trim());
+    }
+    return pages.join("\n\n");
+  }
+
   async function handleImportFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -261,7 +308,22 @@ function Libretos() {
       return;
     }
 
-    const rawText = await file.text();
+    let rawText: string;
+    if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+      try {
+        rawText = await extractTextFromPdf(file);
+      } catch {
+        toast.error("No se pudo leer el PDF. Asegurate de que no sea un PDF escaneado.");
+        return;
+      }
+      if (!rawText.trim()) {
+        toast.error("El PDF no contiene texto extraíble. Puede ser un documento escaneado.");
+        return;
+      }
+    } else {
+      rawText = await file.text();
+    }
+
     const title = file.name
       .replace(/\.[^.]+$/, "")
       .replace(/[-_]+/g, " ")
@@ -298,7 +360,7 @@ function Libretos() {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".txt,.md,.text"
+        accept=".txt,.md,.text,.pdf,application/pdf"
         className="hidden"
         onChange={handleImportFile}
       />
@@ -404,7 +466,8 @@ function Libretos() {
                 script={script}
                 active={script.id === selectedScript?.id}
                 compact={viewMode === "grid"}
-                onSelect={() => setSelectedId(script.id)}
+                menuOpen={openMenuId === script.id}
+                onSelect={() => { setSelectedId(script.id); setOpenMenuId(null); }}
                 onFavorite={(event) => {
                   event.stopPropagation();
                   if (script.user_id !== currentUserId) {
@@ -412,6 +475,32 @@ function Libretos() {
                     return;
                   }
                   favoriteMutation.mutate(script);
+                }}
+                onOpenMenu={(event) => {
+                  event.stopPropagation();
+                  setOpenMenuId((prev) => (prev === script.id ? null : script.id));
+                  setSelectedId(script.id);
+                }}
+                onEdit={() => {
+                  setSelectedId(script.id);
+                  setOpenMenuId(null);
+                  if (script.user_id !== currentUserId) {
+                    toast.error("Solo puedes editar tus libretos.");
+                    return;
+                  }
+                  setEditing(true);
+                }}
+                onDuplicate={() => {
+                  setOpenMenuId(null);
+                  duplicateMutation.mutate(script.id);
+                }}
+                onDelete={() => {
+                  setOpenMenuId(null);
+                  if (script.user_id !== currentUserId) {
+                    toast.error("Solo puedes eliminar tus libretos.");
+                    return;
+                  }
+                  deleteMutation.mutate(script);
                 }}
               />
             ))}
@@ -451,6 +540,9 @@ function Libretos() {
 
                   <div className="flex flex-wrap gap-1.5 mb-4">
                     {selectedScript.is_active && <Pill label="Activo" tone="primary" />}
+                    {selectedScript.fromGrupoNombre && (
+                      <Pill label={`Del grupo: ${selectedScript.fromGrupoNombre}`} tone="primary" />
+                    )}
                     {selectedScript.source_type === "imported" && <Pill label="Importado" />}
                     {selectedScript.source_type === "duplicated" && <Pill label="Copia" />}
                     {isTrash && <Pill label="Papelera" tone="danger" />}
@@ -527,7 +619,7 @@ function Libretos() {
                     <ActionButton
                       icon={CheckCircle2}
                       label="Usar en ensayo"
-                      onClick={() => activeMutation.mutate(selectedScript)}
+                      onClick={() => requireOwnedAction(() => activeMutation.mutate(selectedScript))}
                     />
                     <ActionButton
                       icon={Edit}
@@ -575,6 +667,11 @@ function Libretos() {
               {!isTrash && (
                 <Link
                   to="/configuracion-ensayo"
+                  onClick={() => {
+                    if (selectedScript?.id) {
+                      localStorage.setItem("configuracionEnsayoScriptId", selectedScript.id);
+                    }
+                  }}
                   className="mt-5 block text-center bg-primary-gradient text-primary-foreground rounded-lg py-2 text-sm font-medium"
                 >
                   Configurar ensayo
@@ -596,14 +693,24 @@ function ScriptCard({
   script,
   active,
   compact,
+  menuOpen,
   onSelect,
   onFavorite,
+  onOpenMenu,
+  onEdit,
+  onDuplicate,
+  onDelete,
 }: {
-  script: ScriptRecord;
+  script: ScriptConFuente;
   active: boolean;
   compact: boolean;
+  menuOpen: boolean;
   onSelect: () => void;
   onFavorite: (event: MouseEvent<HTMLButtonElement>) => void;
+  onOpenMenu: (event: MouseEvent<HTMLButtonElement>) => void;
+  onEdit: () => void;
+  onDuplicate: () => void;
+  onDelete: () => void;
 }) {
   const Icon = getScriptIcon(script);
 
@@ -632,6 +739,11 @@ function ScriptCard({
           <span className="text-[11px] px-2 py-0.5 rounded-full border border-border text-muted-foreground">
             {formatActCount(script.act_count)}
           </span>
+          {script.fromGrupoNombre && (
+            <span className="text-[11px] px-2 py-0.5 rounded-full border border-primary/40 text-primary bg-primary/5">
+              Del grupo
+            </span>
+          )}
           {script.deleted_at && (
             <span className="text-[11px] px-2 py-0.5 rounded-full border border-destructive/40 text-destructive">
               Papelera
@@ -646,7 +758,37 @@ function ScriptCard({
         <button onClick={onFavorite} className="text-primary p-1">
           <Star className={`w-4 h-4 ${script.is_favorite ? "fill-primary" : ""}`} />
         </button>
-        <MoreVertical className="w-4 h-4 text-muted-foreground" />
+        {/* BUG 11: MoreVertical con dropdown funcional */}
+        <div className="relative">
+          <button
+            onClick={onOpenMenu}
+            className="p-1 rounded hover:bg-surface transition"
+          >
+            <MoreVertical className="w-4 h-4 text-muted-foreground" />
+          </button>
+          {menuOpen && (
+            <div className="absolute right-0 top-full mt-1 bg-card border border-border/60 rounded-lg shadow-lg z-20 py-1 min-w-[150px]">
+              <button
+                onClick={(e) => { e.stopPropagation(); onEdit(); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-surface transition text-left"
+              >
+                <Edit className="w-3.5 h-3.5" /> Editar
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onDuplicate(); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-surface transition text-left"
+              >
+                <Copy className="w-3.5 h-3.5" /> Duplicar
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-surface text-destructive transition text-left"
+              >
+                <Trash2 className="w-3.5 h-3.5" /> Eliminar
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

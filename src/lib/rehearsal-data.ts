@@ -41,6 +41,7 @@ export type ScriptDetails = {
 export type ImportedScriptLine = {
   characterName: string | null;
   text: string;
+  isStageDirection: boolean;
 };
 
 export type ScriptImportDraft = {
@@ -64,21 +65,16 @@ export type RehearsalDraft = {
 };
 
 const GUEST_PROFILE: PerfilUsuarioRecord = {
-  ai_difficulty: 50,
-  allow_improv: true,
+  id_usuario: "guest",
+  nombre_usuario: "Invitado",
+  foto_perfil: null,
+  rol_global: null,
+  fecha_registro: null,
   avatar_url: null,
   created_at: new Date(0).toISOString(),
   display_name: "Invitado",
   email: null,
-  feedback_enabled: true,
-  notifications_enabled: true,
-  offline_mode_enabled: false,
-  preferred_voice: "Sofia (Femenina)",
-  privacy_level: "privado",
-  rehearsal_mode: "individual",
-  suggest_emotions: true,
   updated_at: new Date(0).toISOString(),
-  user_id: "guest",
 };
 
 function sortByOrder<T extends { sort_order: number }>(items: T[]) {
@@ -107,7 +103,7 @@ export async function getPerfilUsuario() {
   const { data, error } = await supabase
     .from("perfil_usuario")
     .select("*")
-    .eq("user_id", user.id)
+    .eq("id_usuario", user.id)
     .maybeSingle();
 
   if (error) throw error;
@@ -123,7 +119,8 @@ export async function getPerfilUsuario() {
   const { data: created, error: createError } = await supabase
     .from("perfil_usuario")
     .insert({
-      user_id: user.id,
+      id_usuario: user.id,
+      nombre_usuario: fallbackName,
       display_name: fallbackName,
       email: user.email,
       avatar_url: user.user_metadata?.avatar_url ?? null,
@@ -144,10 +141,10 @@ export async function updatePerfilUsuario(patch: TablesUpdate<"perfil_usuario">)
     .upsert(
       {
         ...patch,
-        user_id: user.id,
+        id_usuario: user.id,
         email: user.email,
       },
-      { onConflict: "user_id" },
+      { onConflict: "id_usuario" },
     )
     .select("*")
     .single();
@@ -198,7 +195,8 @@ async function getRowsById<T extends { id: string }>(
   const { data, error } = await supabase.from(table).select("*").in("id", ids);
   if (error) throw error;
 
-  return new Map(((data as T[] | null) ?? []).map((item) => [item.id, item]));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return new Map(((data as any as T[]) ?? []).map((item: T) => [item.id, item]));
 }
 
 export async function getSceneLines(sceneId: string): Promise<ScriptLineWithCharacter[]> {
@@ -222,9 +220,15 @@ export async function getSceneLines(sceneId: string): Promise<ScriptLineWithChar
   }));
 }
 
-export async function getScriptSetup(scriptId?: string, sceneId?: string): Promise<ScriptSetup> {
+export async function getScriptSetup(
+  scriptId?: string,
+  sceneId?: string,
+  scriptOverride?: ScriptRecord,
+): Promise<ScriptSetup> {
   const scripts = await getScripts();
+  // scriptOverride lets callers inject a script not in getScripts() (e.g. another user's group script).
   const script =
+    (scriptOverride?.id === scriptId ? scriptOverride : null) ??
     scripts.find((item) => item.id === scriptId) ??
     scripts.find((item) => item.is_active) ??
     scripts[0] ??
@@ -271,12 +275,13 @@ export async function importScriptFromText(draft: ScriptImportDraft) {
   if (!user) throw new Error("Inicia sesion para importar libretos.");
 
   const parsedLines = parseImportedScriptLines(draft.rawText);
-  if (parsedLines.length === 0) {
-    throw new Error("No se encontraron lineas de dialogo para importar. Verifica el formato del texto.");
+  const dialogueLines = parsedLines.filter((l) => !l.isStageDirection);
+  if (dialogueLines.length === 0) {
+    throw new Error("No se encontraron líneas de diálogo para importar. Verifica el formato del texto.");
   }
 
   const characterNames = Array.from(
-    new Set(parsedLines.map((line) => line.characterName).filter(Boolean)),
+    new Set(dialogueLines.map((l) => l.characterName).filter(Boolean)),
   ) as string[];
   const now = new Date().toISOString();
 
@@ -307,20 +312,10 @@ export async function importScriptFromText(draft: ScriptImportDraft) {
   }
 
   try {
-    // 2. INTENTO DE GUARDAR LA ESCENA
-    const { data: scene, error: sceneError } = await supabase
-      .from("scenes")
-      .insert({
-        script_id: script.id,
-        title: "Escena importada",
-        description: "Escena creada automaticamente al importar el libreto.",
-        sort_order: 1,
-      })
-      .select("*")
-      .single();
+    // 2. AGRUPAR LÍNEAS POR ESCENA
+    const sceneGroups = groupLinesByScene(parsedLines);
 
-    if (sceneError) throw new Error(`Supabase Error (scenes): ${sceneError.message}`);
-
+    // 3. PERSONAJES (una sola vez para todo el script)
     const insertedCharacters = characterNames.length
       ? await insertCharactersForScript(script.id, characterNames)
       : [];
@@ -328,23 +323,42 @@ export async function importScriptFromText(draft: ScriptImportDraft) {
       insertedCharacters.map((character) => [normalizeName(character.name), character.id]),
     );
 
-    // 3. INTENTO DE GUARDAR LAS LÍNEAS DE DIÁLOGO
-    const lines: TablesInsert<"script_lines">[] = parsedLines.map((line, index) => ({
-      scene_id: scene.id,
-      character_id: line.characterName
-        ? (characterByName.get(normalizeName(line.characterName)) ?? null)
-        : null,
-      line_order: index + 1,
-      text: line.text,
-      duration_seconds: estimateLineDuration(line.text),
-    }));
+    // 4. CREAR ESCENAS Y LÍNEAS
+    for (let s = 0; s < sceneGroups.length; s++) {
+      const group = sceneGroups[s];
 
-    const { error: linesError } = await supabase.from("script_lines").insert(lines);
-    if (linesError) throw new Error(`Supabase Error (script_lines): ${linesError.message}`);
+      const { data: scene, error: sceneError } = await supabase
+        .from("scenes")
+        .insert({
+          script_id: script.id,
+          title: group.title,
+          sort_order: s + 1,
+        })
+        .select("*")
+        .single();
+
+      if (sceneError) throw new Error(`Supabase Error (scenes): ${sceneError.message}`);
+
+      if (group.lines.length === 0) continue;
+
+      const lines: TablesInsert<"script_lines">[] = group.lines.map((line, index) => ({
+        scene_id: scene.id,
+        character_id:
+          !line.isStageDirection && line.characterName
+            ? (characterByName.get(normalizeName(line.characterName)) ?? null)
+            : null,
+        line_order: index + 1,
+        text: line.text,
+        duration_seconds: line.isStageDirection ? 0 : estimateLineDuration(line.text),
+        cue: line.isStageDirection ? "stage_direction" : null,
+      }));
+
+      const { error: linesError } = await supabase.from("script_lines").insert(lines);
+      if (linesError) throw new Error(`Supabase Error (script_lines): ${linesError.message}`);
+    }
 
     return script;
   } catch (error) {
-    // Si falla a la mitad, borramos lo que se alcanzó a crear
     await supabase.from("scripts").delete().eq("id", script.id).eq("user_id", user.id);
     throw error;
   }
@@ -543,47 +557,332 @@ async function getScriptBundle(scriptId: string) {
   };
 }
 
-function parseImportedScriptLines(rawText: string): ImportedScriptLine[] {
-  const normalizedLines = rawText
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+// ─── Parser de libretos — sistema de dos pasadas ────────────────────────────
 
-  const parsed: ImportedScriptLine[] = [];
+// Solo usado en el fallback heurístico (sin sección Personajes)
+const SECTION_HEADER_RE =
+  /^(personajes?|lista de personajes|reparto|elenco|escena|acto|lugar|tiempo|nota|descripci[oó]n|obras?|t[ií]tulo|prólogo|prologo|ep[ií]logo|prefacio|introducción|introduccion)\b/i;
+
+const SCRIPT_END_RE =
+  /^(fin\.?|f\.?i\.?n\.?|the end\.?|tel[oó]n\.?|fin de la obra\.?|fin del cuento\.?)$/i;
+
+const TRAILING_END_MARKER_RE =
+  /\s+(fin|tel[oó]n|the end|fin de la obra|fin del cuento)\.?\s*$/i;
+
+const NON_CHARACTER_WORDS = new Set([
+  "a", "al", "con", "de", "del", "e", "el", "en", "entre",
+  "i", "la", "las", "le", "les", "lo", "los", "me", "ni", "o", "os",
+  "para", "pero", "por", "que", "se", "si", "sin", "sobre", "su",
+  "te", "u", "un", "una", "uno", "y", "yo",
+  "autor", "autora", "autores", "género", "genero",
+  "duración", "duracion", "escrito", "escrita", "adaptación", "adaptacion",
+]);
+
+/**
+ * PASADA 1 — extrae nombres de personaje de la sección "Personajes:".
+ * Devuelve los personajes (Map normalizado→canónico) y el índice de la
+ * última línea que pertenece a esa sección (sectionEnd).
+ * El límite de la sección se detecta por línea en blanco O por la primera
+ * línea que no encaja como "Nombre: descripción" dentro del bloque.
+ */
+function extractKnownCharacters(lines: string[]): {
+  characters: Map<string, string>;
+  sectionEnd: number;
+} {
+  const characters = new Map<string, string>();
+  let inSection = false;
+  let sectionEnd = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (!line) {
+      if (inSection) inSection = false; // línea en blanco cierra la sección
+      continue;
+    }
+
+    if (/^(personajes?|lista de personajes|reparto|elenco)\s*:/i.test(line)) {
+      inSection = true;
+      sectionEnd = i; // el encabezado mismo es parte de la sección
+      // Parsear nombres inline: "Personajes: Ana: desc Luis: desc"
+      const afterColon = line.slice(line.indexOf(":") + 1).trim();
+      if (afterColon) {
+        const re = /([A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ]*(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ]*)*):/g;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(afterColon)) !== null) {
+          const name = m[1].trim();
+          if (isValidCharacterName(name)) characters.set(normalizeName(name), name);
+        }
+      }
+      continue;
+    }
+
+    if (inSection) {
+      const colonIdx = line.indexOf(":");
+      if (colonIdx > 0 && colonIdx <= 50) {
+        const name = line.slice(0, colonIdx).trim();
+        if (isValidCharacterName(name)) {
+          characters.set(normalizeName(name), name);
+          sectionEnd = i; // extender el límite de la sección hasta esta línea
+          continue;
+        }
+      }
+      // Línea que no encaja como entrada de personaje → la sección terminó
+      inSection = false;
+    }
+  }
+
+  return { characters, sectionEnd };
+}
+
+/**
+ * PASADA 2A — clasificación estricta cuando se conocen los personajes.
+ * Usa el índice de línea para saltar la sección Personajes en lugar de
+ * un flag booleano que dependía de líneas en blanco (causa del bug).
+ *
+ * DIÁLOGO   = línea con índice > sectionEnd Y "PersonajeConocido: texto"
+ * ACOTACIÓN = todo lo demás
+ */
+function parseWithKnownCharacters(
+  lines: string[],
+  knownChars: Map<string, string>,
+  sectionEnd: number,
+): ImportedScriptLine[] {
+  const result: ImportedScriptLine[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue; // líneas en blanco: ignorar
+
+    // Sección Personajes → acotación (sabemos exactamente hasta qué índice)
+    if (i <= sectionEnd) {
+      result.push({ characterName: null, text: line, isStageDirection: true });
+      continue;
+    }
+
+    // Fuera de la sección: intentar detectar diálogo
+    const colonIdx = line.indexOf(":");
+    if (colonIdx > 0 && colonIdx <= 50) {
+      const potentialName = line.slice(0, colonIdx).trim();
+      const canonical = knownChars.get(normalizeName(potentialName));
+      if (canonical) {
+        const dialogue = line.slice(colonIdx + 1).trim().replace(TRAILING_END_MARKER_RE, "").trim();
+        if (dialogue.length >= 1) {
+          result.push({ characterName: canonical, text: dialogue, isStageDirection: false });
+          continue;
+        }
+      }
+    }
+
+    // Todo lo demás: acotación escénica
+    result.push({ characterName: null, text: line, isStageDirection: true });
+  }
+
+  return result.filter((l) => l.text.length > 0);
+}
+
+/**
+ * PASADA 2B — heurístico de respaldo para guiones sin sección Personajes.
+ */
+function parseHeuristic(lines: string[]): ImportedScriptLine[] {
+  const result: ImportedScriptLine[] = [];
   let currentCharacter: string | null = null;
   let buffer: string[] = [];
+  let skipSection = false;
 
   const flush = () => {
     const text = buffer.join(" ").replace(/\s+/g, " ").trim();
-    if (text) parsed.push({ characterName: currentCharacter, text });
+    if (text && currentCharacter) result.push({ characterName: currentCharacter, text, isStageDirection: false });
     buffer = [];
   };
 
-  for (const line of normalizedLines) {
+  for (const line of lines) {
+    if (!line) { skipSection = false; flush(); continue; }
+
+    if (SCRIPT_END_RE.test(line)) {
+      flush();
+      result.push({ characterName: null, text: line, isStageDirection: true });
+      break;
+    }
+
+    if (/^\(.*\)$/.test(line) || /^\[.*\]$/.test(line)) {
+      result.push({ characterName: null, text: line, isStageDirection: true });
+      continue;
+    }
+
+    const colonIdx = line.indexOf(":");
+    const beforeColon = colonIdx > 0 ? line.slice(0, colonIdx).trim() : line;
+
+    if (SECTION_HEADER_RE.test(beforeColon)) {
+      flush();
+      skipSection = true;
+      currentCharacter = null;
+      buffer = [];
+      result.push({ characterName: null, text: line, isStageDirection: true });
+      continue;
+    }
+
+    if (skipSection) {
+      result.push({ characterName: null, text: line, isStageDirection: true });
+      continue;
+    }
+
+    if (colonIdx > 0 && colonIdx <= 50) {
+      const potentialName = line.slice(0, colonIdx).trim();
+      const dialogue = line.slice(colonIdx + 1).trim().replace(TRAILING_END_MARKER_RE, "").trim();
+      if (dialogue.length >= 5 && isValidCharacterName(potentialName)) {
+        flush();
+        currentCharacter = potentialName;
+        buffer.push(dialogue);
+        flush();
+        continue;
+      }
+    }
+
     if (isCharacterCue(line)) {
       flush();
       currentCharacter = cleanCharacterName(line);
       continue;
     }
 
-    buffer.push(line);
+    if (currentCharacter) {
+      buffer.push(line);
+    } else {
+      result.push({ characterName: null, text: line, isStageDirection: true });
+    }
   }
 
   flush();
-  return parsed;
+  return result.filter((l) => l.text.length > 0);
 }
 
-function isCharacterCue(line: string) {
+// Encabezados de escena/acto que dividen el libreto en escenas
+const SCENE_HEADER_RE = /^(escena|acto|cuadro)\s+(\d+|[ivxlcdmIVXLCDM]+)\b/i;
+
+/**
+ * Agrupa las líneas parseadas en escenas detectando encabezados de acotación
+ * ("Escena 1", "Acto 2", "Cuadro I", etc.).
+ *
+ * - Si no hay encabezados → una sola escena "Escena 1" con todo el contenido.
+ * - El preámbulo (título, subtítulo, lista de personajes) se antepone a la
+ *   primera escena como acotaciones para que el actor vea el contexto.
+ * - El encabezado de escena se usa como título pero NO se incluye en las líneas.
+ */
+function groupLinesByScene(
+  parsedLines: ImportedScriptLine[],
+): Array<{ title: string; lines: ImportedScriptLine[] }> {
+  const hasHeaders = parsedLines.some(
+    (l) => l.isStageDirection && SCENE_HEADER_RE.test(l.text),
+  );
+
+  if (!hasHeaders) {
+    return [{ title: "Escena 1", lines: parsedLines }];
+  }
+
+  const groups: Array<{ title: string; lines: ImportedScriptLine[] }> = [];
+  let inPreamble = true;
+  const preambleLines: ImportedScriptLine[] = [];
+  let currentTitle = "";
+  let currentLines: ImportedScriptLine[] = [];
+
+  for (const line of parsedLines) {
+    if (line.isStageDirection && SCENE_HEADER_RE.test(line.text)) {
+      if (!inPreamble) {
+        groups.push({ title: currentTitle, lines: currentLines });
+      }
+      inPreamble = false;
+      currentTitle = line.text.trim();
+      currentLines = [];
+    } else if (inPreamble) {
+      preambleLines.push(line);
+    } else {
+      currentLines.push(line);
+    }
+  }
+
+  if (!inPreamble) {
+    groups.push({ title: currentTitle, lines: currentLines });
+  }
+
+  // Anteponer el preámbulo a la primera escena para mostrar el contexto al actor
+  if (preambleLines.length > 0 && groups.length > 0) {
+    groups[0] = { title: groups[0].title, lines: [...preambleLines, ...groups[0].lines] };
+  }
+
+  return groups;
+}
+
+/**
+ * Punto de entrada. Usa dos pasadas si hay sección Personajes; heurístico si no.
+ */
+function parseImportedScriptLines(rawText: string): ImportedScriptLine[] {
+  const rawLines = rawText.replace(/\r/g, "").split("\n").map((l) => l.trim());
+
+  // ── DEBUG TEMPORAL ────────────────────────────────────────────────────────
+  console.log("=== [PARSER DEBUG] rawLines (primeras 40) ===");
+  rawLines.slice(0, 40).forEach((l, i) => console.log(`  [${i}] ${JSON.stringify(l)}`));
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const { characters: knownCharacters, sectionEnd } = extractKnownCharacters(rawLines);
+
+  // ── DEBUG TEMPORAL ────────────────────────────────────────────────────────
+  console.log(`=== [PARSER DEBUG] personajes (pasada 1) | sectionEnd=${sectionEnd} ===`);
+  if (knownCharacters.size === 0) {
+    console.log("  (ninguno — heurístico)");
+  } else {
+    knownCharacters.forEach((canonical, normalized) =>
+      console.log(`  ${JSON.stringify(normalized)} → ${JSON.stringify(canonical)}`),
+    );
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const result =
+    knownCharacters.size > 0
+      ? parseWithKnownCharacters(rawLines, knownCharacters, sectionEnd)
+      : parseHeuristic(rawLines);
+
+  // ── DEBUG TEMPORAL ────────────────────────────────────────────────────────
+  console.log("=== [PARSER DEBUG] primeras 20 líneas clasificadas ===");
+  result.slice(0, 20).forEach((l, i) =>
+    console.log(
+      `  [${i}] ${l.isStageDirection ? "ACOTACIÓN" : `DIÁLOGO(${l.characterName})`} → ${JSON.stringify(l.text)}`,
+    ),
+  );
+  console.log(
+    `  total=${result.length} | diálogos=${result.filter((l) => !l.isStageDirection).length} | acotaciones=${result.filter((l) => l.isStageDirection).length}`,
+  );
+  // ─────────────────────────────────────────────────────────────────────────
+
+  return result;
+}
+
+function isValidCharacterName(name: string): boolean {
+  if (!name || name.length > 50) return false;
+  if (/[.!?¿¡;,]/.test(name)) return false;
+  if (/^\d/.test(name)) return false;
+  const words = name.trim().split(/\s+/);
+  if (words.length < 1 || words.length > 4) return false;
+  if (words.some((w) => NON_CHARACTER_WORDS.has(w.toLowerCase()))) return false;
+  return words.every((w) => /^[A-ZÁÉÍÓÚÑ]/.test(w));
+}
+
+function isCharacterCue(line: string): boolean {
   const cleaned = cleanCharacterName(line);
-  if (!cleaned || cleaned.length > 40) return false;
+  if (!cleaned || cleaned.length > 50) return false;
   if (/^\d+$/.test(cleaned)) return false;
   if (/[.!?¿¡]/.test(cleaned)) return false;
-  return cleaned === cleaned.toUpperCase() && /[A-ZÁÉÍÓÚÑ]/i.test(cleaned);
+
+  // Formato clásico: nombre en MAYÚSCULAS completas en línea propia
+  if (cleaned === cleaned.toUpperCase() && /[A-ZÁÉÍÓÚÑ]/i.test(cleaned)) return true;
+
+  // Formato "Nombre:" o "NOMBRE:" — línea que termina en dos puntos, sin diálogo
+  if (line.trim().endsWith(":") && isValidCharacterName(cleaned)) return true;
+
+  return false;
 }
 
-function cleanCharacterName(value: string) {
-  return value.replace(/[:.-]+$/g, "").trim();
+function cleanCharacterName(value: string): string {
+  return value.replace(/[:.\-]+$/g, "").trim();
 }
 
 function normalizeName(value: string) {
@@ -662,9 +961,13 @@ export async function createTeleprompterRecording(
 }
 
 export async function getRecentRehearsals(limit = 3): Promise<RehearsalSummary[]> {
+  const user = await getCurrentUser();
+  if (!user) return [];
+
   const { data, error } = await supabase
     .from("rehearsal_sessions")
     .select("*")
+    .eq("user_id", user.id)
     .order("updated_at", { ascending: false })
     .limit(limit);
 
@@ -717,6 +1020,167 @@ async function hydrateRehearsals(sessions: RehearsalSessionRecord[]): Promise<Re
       ? (charactersById.get(session.selected_character_id) ?? null)
       : null,
   }));
+}
+
+// ── Tipo extendido con scores (columnas añadidas en migración) ─────────────────
+export type TeleprompterRecordingWithScore = TeleprompterRecordingRecord & {
+  similarity_score: number | null;
+  confidence_score: number | null;
+  transcription: string | null;
+};
+
+// ── Subir audio a Supabase Storage ────────────────────────────────────────────
+export async function uploadAudioToStorage(
+  blob: Blob,
+  path: string,
+): Promise<string | null> {
+  const { data, error } = await supabase.storage
+    .from("rehearsal-audio")
+    .upload(path, blob, { upsert: true, contentType: blob.type || "audio/webm" });
+
+  if (error) {
+    console.error("[Storage] Error subiendo audio:", error.message);
+    return null;
+  }
+
+  const { data: urlData } = supabase.storage
+    .from("rehearsal-audio")
+    .getPublicUrl(data.path);
+
+  return urlData.publicUrl;
+}
+
+// ── Grabaciones de una sesión ─────────────────────────────────────────────────
+export async function getSessionRecordings(
+  rehearsalSessionId: string,
+): Promise<TeleprompterRecordingWithScore[]> {
+  const user = await getCurrentUser();
+  if (!user) return [];
+
+  const { data, error } = await supabase
+    .from("teleprompter_recordings")
+    .select("*")
+    .eq("rehearsal_session_id", rehearsalSessionId)
+    .eq("user_id", user.id)
+    .order("segment_index", { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as TeleprompterRecordingWithScore[];
+}
+
+// ── Guardar o actualizar grabación de una línea ───────────────────────────────
+export async function saveLineRecording({
+  rehearsalSessionId,
+  teleprompterSessionId,
+  lineId,
+  characterName,
+  segmentIndex,
+  transcription,
+  audioUrl,
+  similarityScore,
+  confidenceScore,
+  durationSec,
+}: {
+  rehearsalSessionId: string;
+  teleprompterSessionId: string;
+  lineId: string;
+  characterName: string;
+  segmentIndex: number;
+  transcription: string;
+  audioUrl: string | null;
+  similarityScore: number;
+  confidenceScore: number;
+  durationSec?: number;
+}) {
+  const user = await getCurrentUser();
+  if (!user) throw new Error("Inicia sesion para guardar la grabacion.");
+
+  // Buscar si ya existe una toma para esta línea
+  const { data: existing } = await supabase
+    .from("teleprompter_recordings")
+    .select("id")
+    .eq("rehearsal_session_id", rehearsalSessionId)
+    .eq("recording_id", lineId)
+    .maybeSingle();
+
+  const payload = {
+    segment_text: transcription,
+    audio_url: audioUrl,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    similarity_score: similarityScore as any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    confidence_score: confidenceScore as any,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    transcription: transcription as any,
+    duration_sec: durationSec ?? null,
+  };
+
+  if (existing?.id) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (supabase as any)
+      .from("teleprompter_recordings")
+      .update(payload)
+      .eq("id", existing.id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (supabase as any)
+    .from("teleprompter_recordings")
+    .insert({
+      user_id: user.id,
+      rehearsal_session_id: rehearsalSessionId,
+      teleprompter_session_id: teleprompterSessionId,
+      recording_id: lineId,
+      character_name: characterName,
+      segment_index: segmentIndex,
+      ...payload,
+    })
+    .select("*")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+// ── Actualizar personaje (actor_type, voice, etc.) ────────────────────────────
+export async function updateCharacter(
+  characterId: string,
+  patch: TablesUpdate<"characters">,
+) {
+  const { data, error } = await supabase
+    .from("characters")
+    .update(patch)
+    .eq("id", characterId)
+    .select("*")
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+// ── Agregar personaje a un libreto ────────────────────────────────────────────
+export async function addCharacterToScript(
+  scriptId: string,
+  name: string,
+  actorType: "user" | "ai",
+  currentCount: number,
+) {
+  const { data, error } = await supabase
+    .from("characters")
+    .insert({
+      script_id: scriptId,
+      name: name.trim(),
+      actor_type: actorType,
+      sort_order: currentCount + 1,
+      base_emotion: "Neutral",
+    })
+    .select("*")
+    .single();
+  if (error) throw error;
+  return data;
 }
 
 export function formatActCount(count: number) {

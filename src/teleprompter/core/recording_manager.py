@@ -1,62 +1,17 @@
 """
 recording_manager.py
-Capa de datos y grabación adaptada al nuevo esquema relacional en Supabase (PostgreSQL).
+Simplificado: grabación y reproducción de audio movidas al browser
+(MediaRecorder + Web Audio API).
+FastAPI ahora solo gestiona IDs de sesión locales y scoring de texto.
 """
 
 from __future__ import annotations
 
-import os
-import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
-from typing import Callable, Optional, List
+from typing import Optional
 
-import numpy as np
-import pyaudio
-import sounddevice as sd
-import soundfile as sf
-from dotenv import load_dotenv
-from supabase import create_client, Client
-
-# Cargar variables del entorno (.env) automáticamente
-load_dotenv()
-
-# ── Constantes de audio ───────────────────────────────────────────────────────
-SAMPLE_RATE    = 16_000
-CHANNELS       = 1
-CHUNK_SIZE     = 1_024
-RECORDINGS_DIR = Path("recordings")
-RECORDINGS_DIR.mkdir(exist_ok=True)
-
-
-# ── Modelos de datos (Esquema Relacional) ─────────────────────────────────────
-@dataclass
-class Actor:
-    id_actor: str
-    nombre: str
-    perfil_voz: str
-    estilo_interpretativo: str
-
-@dataclass
-class Obra:
-    id_obra: str
-    titulo: str
-    texto_guion: str
-
-@dataclass
-class Personaje:
-    id_personaje: str
-    id_obra: str
-    nombre: str
-
-@dataclass
-class LineaDialogo:
-    id_linea: str
-    id_personaje: str
-    orden_secuencia: int
-    texto_esperado: str
-    emocion_base: str
 
 @dataclass
 class Ensayo:
@@ -65,218 +20,23 @@ class Ensayo:
     modo_ensayo: str
     fecha_hora: str
 
-@dataclass
-class Grabacion:
-    id_grabacion: str
-    id_linea: str
-    id_actor: str
-    ruta_archivo_audio: str
-    es_toma_activa: bool
 
-
-# ── Base de datos (Supabase) ──────────────────────────────────────────────────
 class RecordingDB:
-    def __init__(self):
-        url: str = os.environ.get("SUPABASE_URL") or os.environ.get("VITE_SUPABASE_URL")
-        key: str = os.environ.get("SUPABASE_PUBLISHABLE_KEY") or os.environ.get("VITE_SUPABASE_PUBLISHABLE_KEY")
+    """Rastrea sesiones activas en memoria (no escribe en Supabase)."""
 
-        if not url or not key:
-            raise ValueError("Faltan credenciales de Supabase en las variables de entorno.")
+    def __init__(self) -> None:
+        self._sessions: dict[str, Ensayo] = {}
 
-        self.supabase: Client = create_client(url, key)
-
-    # ── Métodos CRUD ──────────────────────────────────────────────────────────
     def iniciar_ensayo(self, id_obra: str, modo_ensayo: str) -> Ensayo:
-        fecha_hora = datetime.now().isoformat()
-
-        response = self.supabase.table("rehearsal_sessions").insert({
-            "script_id": id_obra,
-            "mode": modo_ensayo,
-            "started_at": fecha_hora
-        }).execute()
-
-        if not response.data:
-            raise Exception("No se pudo crear el ensayo en Supabase")
-
-        row = response.data[0]
-        return Ensayo(
-            id_ensayo=row["id"],
-            id_obra=row["script_id"],
-            modo_ensayo=row["mode"],
-            fecha_hora=row["started_at"]
+        session_id = str(uuid.uuid4())
+        ensayo = Ensayo(
+            id_ensayo=session_id,
+            id_obra=id_obra,
+            modo_ensayo=modo_ensayo,
+            fecha_hora=datetime.now().isoformat(),
         )
+        self._sessions[session_id] = ensayo
+        return ensayo
 
     def get_ensayo(self, id_ensayo: str) -> Optional[Ensayo]:
-        response = self.supabase.table("rehearsal_sessions").select("*").eq("id", id_ensayo).execute()
-
-        if not response.data:
-            return None
-
-        row = response.data[0]
-        return Ensayo(
-            id_ensayo=row["id"],
-            id_obra=row["script_id"],
-            modo_ensayo=row["mode"],
-            fecha_hora=row["started_at"]
-        )
-
-    def guardar_toma_audio(self, id_linea: str, id_actor: str, ruta_audio: str, id_ensayo: str = "") -> Grabacion:
-        # Simplemente retornamos sin guardar en BD
-        return Grabacion(
-            id_grabacion="local",
-            id_linea=id_linea,
-            id_actor=id_actor,
-            ruta_archivo_audio=ruta_audio,
-            es_toma_activa=True
-        )
-
-    def obtener_grabacion_activa_por_linea(self, id_linea: str) -> Optional[Grabacion]:
-        response = self.supabase.table("rehearsal_recordings_metadata").select("*").eq("teleprompter_session_id", id_linea).execute()
-
-        if not response.data:
-            return None
-
-        row = response.data[0]
-        return Grabacion(
-            id_grabacion=row["id"],
-            id_linea=id_linea,
-            id_actor=row["user_id"],
-            ruta_archivo_audio=row.get("audio_url", ""),
-            es_toma_activa=True
-        )
-
-
-# ── Grabador de personaje ─────────────────────────────────────────────────────
-class CharacterRecorder:
-    def __init__(self, db: RecordingDB):
-        self.db = db
-        self._recording = False
-        self._frames: list[np.ndarray] = []
-        self._thread: Optional[threading.Thread] = None
-        self._stop_evt = threading.Event()
-
-        # Estado actual de grabación
-        self._id_ensayo: str = ""
-        self._id_actor: str = ""
-        self._id_linea: str = ""
-        self._mic_index: Optional[int] = None
-
-    @property
-    def is_recording(self) -> bool:
-        return self._recording
-
-    def start_recording(self, id_ensayo: str, id_actor: str, id_linea: str, mic_index: Optional[int] = None):
-        if self._recording:
-            raise RuntimeError("Ya hay una grabación en curso.")
-
-        self._id_ensayo = id_ensayo
-        self._id_actor = id_actor
-        self._id_linea = id_linea
-        self._mic_index = mic_index
-        self._frames = []
-        self._stop_evt.clear()
-        self._recording = True
-        self._thread = threading.Thread(target=self._record_loop, daemon=True)
-        self._thread.start()
-
-    def stop_recording(self) -> Optional[Grabacion]:
-        if not self._recording:
-            return None
-        self._stop_evt.set()
-        self._recording = False
-        if self._thread:
-            self._thread.join(timeout=3)
-        if not self._frames:
-            return None
-
-        audio = np.concatenate(self._frames)
-        filename = f"ensayo{self._id_ensayo}_actor{self._id_actor}_linea{self._id_linea}.wav"
-        audio_path = str(RECORDINGS_DIR / filename)
-        sf.write(audio_path, audio, SAMPLE_RATE)
-
-        # Pasa el id_ensayo correctamente
-        return self.db.guardar_toma_audio(
-            id_linea=self._id_linea,
-            id_actor=self._id_actor,
-            ruta_audio=audio_path,
-            id_ensayo=self._id_ensayo
-        )
-
-    def _record_loop(self):
-        p = pyaudio.PyAudio()
-        try:
-            stream = p.open(
-                format=pyaudio.paFloat32, channels=CHANNELS,
-                rate=SAMPLE_RATE, input=True,
-                input_device_index=self._mic_index,
-                frames_per_buffer=CHUNK_SIZE,
-            )
-        except Exception as e:
-            print(f"[CharacterRecorder] Error: {e}")
-            p.terminate()
-            self._recording = False
-            return
-
-        while not self._stop_evt.is_set():
-            try:
-                data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
-                chunk = np.frombuffer(data, dtype=np.float32)
-                self._frames.append(chunk)
-            except Exception:
-                break
-
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-
-
-# ── Motor de reproducción ─────────────────────────────────────────────────────
-class PlaybackEngine:
-    def __init__(self):
-        self._playing = False
-        self._thread: Optional[threading.Thread] = None
-        self._stop_evt = threading.Event()
-        self.on_start: Optional[Callable[[str], None]] = None
-        self.on_finish: Optional[Callable[[str], None]] = None
-
-    @property
-    def is_playing(self) -> bool:
-        return self._playing
-
-    def play(self, audio_path: str, id_personaje: str = "0"):
-        self.stop()
-        self._stop_evt.clear()
-        self._playing = True
-        self._thread = threading.Thread(
-            target=self._play_loop, args=(audio_path, id_personaje), daemon=True
-        )
-        self._thread.start()
-
-    def stop(self):
-        if self._playing:
-            self._stop_evt.set()
-            self._playing = False
-            if self._thread:
-                self._thread.join(timeout=2)
-
-    def _play_loop(self, audio_path: str, id_personaje: str):
-        try:
-            data, sr = sf.read(audio_path, dtype="float32")
-            if self.on_start:
-                self.on_start(id_personaje)
-            chunk_samples = 1_024
-            idx = 0
-            with sd.OutputStream(samplerate=sr, channels=1, dtype="float32") as stream:
-                while idx < len(data) and not self._stop_evt.is_set():
-                    end = min(idx + chunk_samples, len(data))
-                    block = data[idx:end]
-                    if block.ndim == 1:
-                        block = block.reshape(-1, 1)
-                    stream.write(block)
-                    idx = end
-        except Exception as e:
-            print(f"[PlaybackEngine] Error: {e}")
-        finally:
-            self._playing = False
-            if self.on_finish:
-                self.on_finish(id_personaje)
+        return self._sessions.get(id_ensayo)

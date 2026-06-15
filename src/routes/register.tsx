@@ -61,12 +61,13 @@ function Register() {
     if (data.session && data.user) {
       const { error: profileError } = await supabase.from("perfil_usuario").upsert(
         {
-          user_id: data.user.id,
+          id_usuario: data.user.id,
+          nombre_usuario: name,
           display_name: name,
           email,
           avatar_url: data.user.user_metadata?.avatar_url ?? null,
         },
-        { onConflict: "user_id" },
+        { onConflict: "id_usuario" },
       );
 
       if (profileError) {

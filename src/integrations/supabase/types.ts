@@ -1,8 +1,6 @@
 export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
 
 export type Database = {
-  // Allows to automatically instantiate createClient with right options
-  // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
     PostgrestVersion: "14.5";
   };
@@ -37,55 +35,40 @@ export type Database = {
       };
       perfil_usuario: {
         Row: {
-          ai_difficulty: number;
-          allow_improv: boolean;
+          id_usuario: string;
+          nombre_usuario: string | null;
+          foto_perfil: string | null;
+          rol_global: string | null;
+          fecha_registro: string | null;
           avatar_url: string | null;
           created_at: string;
           display_name: string | null;
           email: string | null;
-          feedback_enabled: boolean;
-          notifications_enabled: boolean;
-          offline_mode_enabled: boolean;
-          preferred_voice: string;
-          privacy_level: string;
-          rehearsal_mode: string;
-          suggest_emotions: boolean;
           updated_at: string;
-          user_id: string;
         };
         Insert: {
-          ai_difficulty?: number;
-          allow_improv?: boolean;
+          id_usuario: string;
+          nombre_usuario?: string | null;
+          foto_perfil?: string | null;
+          rol_global?: string | null;
+          fecha_registro?: string | null;
           avatar_url?: string | null;
           created_at?: string;
           display_name?: string | null;
           email?: string | null;
-          feedback_enabled?: boolean;
-          notifications_enabled?: boolean;
-          offline_mode_enabled?: boolean;
-          preferred_voice?: string;
-          privacy_level?: string;
-          rehearsal_mode?: string;
-          suggest_emotions?: boolean;
           updated_at?: string;
-          user_id: string;
         };
         Update: {
-          ai_difficulty?: number;
-          allow_improv?: boolean;
+          id_usuario?: string;
+          nombre_usuario?: string | null;
+          foto_perfil?: string | null;
+          rol_global?: string | null;
+          fecha_registro?: string | null;
           avatar_url?: string | null;
           created_at?: string;
           display_name?: string | null;
           email?: string | null;
-          feedback_enabled?: boolean;
-          notifications_enabled?: boolean;
-          offline_mode_enabled?: boolean;
-          preferred_voice?: string;
-          privacy_level?: string;
-          rehearsal_mode?: string;
-          suggest_emotions?: boolean;
           updated_at?: string;
-          user_id?: string;
         };
         Relationships: [];
       };
@@ -369,44 +352,155 @@ export type Database = {
         Row: {
           audio_url: string | null;
           character_name: string;
+          confidence_score: number | null;
           created_at: string;
           duration_sec: number | null;
           id: string;
+          line_id: string | null;
           recording_id: string | null;
           rehearsal_session_id: string;
           segment_index: number;
           segment_text: string | null;
+          similarity_score: number | null;
           teleprompter_session_id: string;
+          transcription: string | null;
           updated_at: string;
           user_id: string;
         };
         Insert: {
           audio_url?: string | null;
           character_name: string;
+          confidence_score?: number | null;
           created_at?: string;
           duration_sec?: number | null;
           id?: string;
+          line_id?: string | null;
           recording_id?: string | null;
           rehearsal_session_id: string;
           segment_index: number;
           segment_text?: string | null;
+          similarity_score?: number | null;
           teleprompter_session_id: string;
+          transcription?: string | null;
           updated_at?: string;
           user_id: string;
         };
         Update: {
           audio_url?: string | null;
           character_name?: string;
+          confidence_score?: number | null;
           created_at?: string;
           duration_sec?: number | null;
           id?: string;
+          line_id?: string | null;
           recording_id?: string | null;
           rehearsal_session_id?: string;
           segment_index?: number;
           segment_text?: string | null;
+          similarity_score?: number | null;
           teleprompter_session_id?: string;
+          transcription?: string | null;
           updated_at?: string;
           user_id?: string;
+        };
+        Relationships: [];
+      };
+      grupos: {
+        Row: {
+          id: string;
+          nombre: string;
+          codigo_invitacion: string;
+          creado_por: string;
+          max_miembros: number;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          nombre: string;
+          codigo_invitacion: string;
+          creado_por: string;
+          max_miembros?: number;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          nombre?: string;
+          codigo_invitacion?: string;
+          creado_por?: string;
+          max_miembros?: number;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
+      grupo_miembros: {
+        Row: {
+          id: string;
+          grupo_id: string;
+          user_id: string;
+          rol: string;
+          personaje_id: string | null;
+          joined_at: string;
+        };
+        Insert: {
+          id?: string;
+          grupo_id: string;
+          user_id: string;
+          rol?: string;
+          personaje_id?: string | null;
+          joined_at?: string;
+        };
+        Update: {
+          id?: string;
+          grupo_id?: string;
+          user_id?: string;
+          rol?: string;
+          personaje_id?: string | null;
+          joined_at?: string;
+        };
+        Relationships: [];
+      };
+      grupo_libretos: {
+        Row: {
+          id: string;
+          grupo_id: string;
+          script_id: string;
+          added_at: string;
+        };
+        Insert: {
+          id?: string;
+          grupo_id: string;
+          script_id: string;
+          added_at?: string;
+        };
+        Update: {
+          id?: string;
+          grupo_id?: string;
+          script_id?: string;
+          added_at?: string;
+        };
+        Relationships: [];
+      };
+      grupo_anuncios: {
+        Row: {
+          id: string;
+          grupo_id: string;
+          user_id: string;
+          contenido: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          grupo_id: string;
+          user_id: string;
+          contenido: string;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          grupo_id?: string;
+          user_id?: string;
+          contenido?: string;
+          created_at?: string;
         };
         Relationships: [];
       };

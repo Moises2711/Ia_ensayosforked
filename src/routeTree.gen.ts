@@ -12,12 +12,15 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as RegisterRouteImport } from './routes/register'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as LibretosRouteImport } from './routes/libretos'
+import { Route as GruposRouteImport } from './routes/grupos'
 import { Route as FinalizadoRouteImport } from './routes/finalizado'
 import { Route as EnsayosRouteImport } from './routes/ensayos'
 import { Route as EnsayoRouteImport } from './routes/ensayo'
 import { Route as ConfiguracionEnsayoRouteImport } from './routes/configuracion-ensayo'
 import { Route as ConfiguracionRouteImport } from './routes/configuracion'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as GruposIndexRouteImport } from './routes/grupos.index'
+import { Route as GruposGrupoIdRouteImport } from './routes/grupos.$grupoId'
 
 const RegisterRoute = RegisterRouteImport.update({
   id: '/register',
@@ -32,6 +35,11 @@ const LoginRoute = LoginRouteImport.update({
 const LibretosRoute = LibretosRouteImport.update({
   id: '/libretos',
   path: '/libretos',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GruposRoute = GruposRouteImport.update({
+  id: '/grupos',
+  path: '/grupos',
   getParentRoute: () => rootRouteImport,
 } as any)
 const FinalizadoRoute = FinalizadoRouteImport.update({
@@ -64,6 +72,16 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const GruposIndexRoute = GruposIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => GruposRoute,
+} as any)
+const GruposGrupoIdRoute = GruposGrupoIdRouteImport.update({
+  id: '/$grupoId',
+  path: '/$grupoId',
+  getParentRoute: () => GruposRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -72,9 +90,12 @@ export interface FileRoutesByFullPath {
   '/ensayo': typeof EnsayoRoute
   '/ensayos': typeof EnsayosRoute
   '/finalizado': typeof FinalizadoRoute
+  '/grupos': typeof GruposRouteWithChildren
   '/libretos': typeof LibretosRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/grupos/$grupoId': typeof GruposGrupoIdRoute
+  '/grupos/': typeof GruposIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -86,6 +107,8 @@ export interface FileRoutesByTo {
   '/libretos': typeof LibretosRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/grupos/$grupoId': typeof GruposGrupoIdRoute
+  '/grupos': typeof GruposIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -95,9 +118,12 @@ export interface FileRoutesById {
   '/ensayo': typeof EnsayoRoute
   '/ensayos': typeof EnsayosRoute
   '/finalizado': typeof FinalizadoRoute
+  '/grupos': typeof GruposRouteWithChildren
   '/libretos': typeof LibretosRoute
   '/login': typeof LoginRoute
   '/register': typeof RegisterRoute
+  '/grupos/$grupoId': typeof GruposGrupoIdRoute
+  '/grupos/': typeof GruposIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -108,9 +134,12 @@ export interface FileRouteTypes {
     | '/ensayo'
     | '/ensayos'
     | '/finalizado'
+    | '/grupos'
     | '/libretos'
     | '/login'
     | '/register'
+    | '/grupos/$grupoId'
+    | '/grupos/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -122,6 +151,8 @@ export interface FileRouteTypes {
     | '/libretos'
     | '/login'
     | '/register'
+    | '/grupos/$grupoId'
+    | '/grupos'
   id:
     | '__root__'
     | '/'
@@ -130,9 +161,12 @@ export interface FileRouteTypes {
     | '/ensayo'
     | '/ensayos'
     | '/finalizado'
+    | '/grupos'
     | '/libretos'
     | '/login'
     | '/register'
+    | '/grupos/$grupoId'
+    | '/grupos/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -142,6 +176,7 @@ export interface RootRouteChildren {
   EnsayoRoute: typeof EnsayoRoute
   EnsayosRoute: typeof EnsayosRoute
   FinalizadoRoute: typeof FinalizadoRoute
+  GruposRoute: typeof GruposRouteWithChildren
   LibretosRoute: typeof LibretosRoute
   LoginRoute: typeof LoginRoute
   RegisterRoute: typeof RegisterRoute
@@ -168,6 +203,13 @@ declare module '@tanstack/react-router' {
       path: '/libretos'
       fullPath: '/libretos'
       preLoaderRoute: typeof LibretosRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/grupos': {
+      id: '/grupos'
+      path: '/grupos'
+      fullPath: '/grupos'
+      preLoaderRoute: typeof GruposRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/finalizado': {
@@ -212,8 +254,35 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/grupos/': {
+      id: '/grupos/'
+      path: '/'
+      fullPath: '/grupos/'
+      preLoaderRoute: typeof GruposIndexRouteImport
+      parentRoute: typeof GruposRoute
+    }
+    '/grupos/$grupoId': {
+      id: '/grupos/$grupoId'
+      path: '/$grupoId'
+      fullPath: '/grupos/$grupoId'
+      preLoaderRoute: typeof GruposGrupoIdRouteImport
+      parentRoute: typeof GruposRoute
+    }
   }
 }
+
+interface GruposRouteChildren {
+  GruposGrupoIdRoute: typeof GruposGrupoIdRoute
+  GruposIndexRoute: typeof GruposIndexRoute
+}
+
+const GruposRouteChildren: GruposRouteChildren = {
+  GruposGrupoIdRoute: GruposGrupoIdRoute,
+  GruposIndexRoute: GruposIndexRoute,
+}
+
+const GruposRouteWithChildren =
+  GruposRoute._addFileChildren(GruposRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
@@ -222,6 +291,7 @@ const rootRouteChildren: RootRouteChildren = {
   EnsayoRoute: EnsayoRoute,
   EnsayosRoute: EnsayosRoute,
   FinalizadoRoute: FinalizadoRoute,
+  GruposRoute: GruposRouteWithChildren,
   LibretosRoute: LibretosRoute,
   LoginRoute: LoginRoute,
   RegisterRoute: RegisterRoute,

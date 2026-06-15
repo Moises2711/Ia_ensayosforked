@@ -1,6 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { Home, FileText, Drama, Settings, LogIn, LogOut } from "lucide-react";
+import { Home, FileText, Drama, Settings, LogIn, LogOut, Users } from "lucide-react";
 import { toast } from "sonner";
 import { AppLogo } from "./AppLogo";
 import { useAuth } from "@/hooks/useAuth";
@@ -10,6 +10,7 @@ const NAV = [
   { to: "/", label: "Inicio", icon: Home },
   { to: "/libretos", label: "Libretos", icon: FileText },
   { to: "/ensayos", label: "Ensayos", icon: Drama },
+  { to: "/grupos", label: "Grupos", icon: Users },
   { to: "/configuracion", label: "Configuración", icon: Settings },
 ] as const;
 
