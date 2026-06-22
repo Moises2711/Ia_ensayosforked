@@ -1,27 +1,3 @@
-# Whisper Teleprompter – Backend v2
-# Dependencias Python
-
-# ── Core ML ──────────────────────────────────────────────────────────────────
-openai-whisper
-torch
-torchvision
-torchaudio
-
-# ── OCR ───────────────────────────────────────────────────────────────────────
-paddlepaddle          # CPU; usar paddlepaddle-gpu si tienes CUDA
-paddleocr
-pymupdf               # fitz – conversión PDF → imagen
-
-# ── Audio ────────────────────────────────────────────────────────────────────
-pyaudio
-sounddevice
-soundfile
-numpy
-
-# ── API Web ───────────────────────────────────────────────────────────────────
 fastapi
 uvicorn[standard]
-python-multipart      # para UploadFile
-
-# ── Opcional: acceso a la UI de Tkinter (solo si usas la app de escritorio) ─
-# (tkinter viene incluido en Python estándar, no se instala con pip)
+pydantic
