@@ -618,12 +618,26 @@ function extractKnownCharacters(lines: string[]): {
     }
 
     if (inSection) {
+      // Formato "Nombre: descripción"
       const colonIdx = line.indexOf(":");
       if (colonIdx > 0 && colonIdx <= 50) {
         const name = line.slice(0, colonIdx).trim();
         if (isValidCharacterName(name)) {
           characters.set(normalizeName(name), name);
-          sectionEnd = i; // extender el límite de la sección hasta esta línea
+          sectionEnd = i;
+          continue;
+        }
+      }
+      // Formato viñeta: "- Ana", "• Bruno", "* Carla", "1. Diego", "1) Eva"
+      // También cubre "- Ana: la protagonista"
+      const bulletMatch = line.match(/^(?:[•\-\*]|\d+[.)]) *(.+)/);
+      if (bulletMatch) {
+        const rest = bulletMatch[1].trim();
+        const bulletColon = rest.indexOf(":");
+        const name = bulletColon > 0 && bulletColon <= 50 ? rest.slice(0, bulletColon).trim() : rest;
+        if (isValidCharacterName(name)) {
+          characters.set(normalizeName(name), name);
+          sectionEnd = i;
           continue;
         }
       }

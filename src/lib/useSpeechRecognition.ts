@@ -94,7 +94,7 @@ export function useSpeechRecognition({
     const resetSilenceTimer = () => {
       clearSilenceTimer();
       silenceTimerRef.current = setTimeout(() => {
-        // Silencio de 2.5 s detectado → detener y entregar resultado
+        console.log("[SR] silencio detectado después de", SILENCE_TIMEOUT_MS, "ms → stop()");
         try { recRef.current?.stop(); } catch {}
       }, SILENCE_TIMEOUT_MS);
     };
@@ -115,6 +115,7 @@ export function useSpeechRecognition({
         }
       }
       const display = interimText || finalRef.current.transcript;
+      console.log("[SR] onresult | interim:", JSON.stringify(interimText), "| acumulado:", JSON.stringify(finalRef.current.transcript));
       setInterim(display);
       onInterim?.(display);
     };
@@ -123,6 +124,7 @@ export function useSpeechRecognition({
       clearSilenceTimer();
       setIsListening(false);
       setInterim("");
+      console.log("[SR] onend | transcript final:", JSON.stringify(finalRef.current.transcript), "| confidence:", finalRef.current.confidence);
       onFinal?.(finalRef.current.transcript, finalRef.current.confidence);
     };
 
@@ -130,6 +132,7 @@ export function useSpeechRecognition({
       clearSilenceTimer();
       setIsListening(false);
       setInterim("");
+      console.log("[SR] onerror:", e.error, e.message);
       if (e.error !== "no-speech" && e.error !== "aborted") {
         onError?.(e.error);
       }
@@ -142,6 +145,7 @@ export function useSpeechRecognition({
     try {
       rec.start();
       setIsListening(true);
+      console.log("[SR] start() llamado | lang:", lang, "| timer arrancado, expira en", SILENCE_TIMEOUT_MS, "ms");
     } catch (err) {
       clearSilenceTimer();
       onError?.(String(err));

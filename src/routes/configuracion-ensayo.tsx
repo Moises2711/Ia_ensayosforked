@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -37,7 +37,7 @@ import {
   createTeleprompterEnsayo,
   teleprompterApiUrl,
 } from "@/lib/teleprompter-api";
-import { getGrupoParaScript, getMisGrupos, getScriptDelGrupo, getScriptDetailsForGrupo } from "@/lib/grupos-api";
+import { getGrupoParaScript, getScriptDetailsForGrupo } from "@/lib/grupos-api";
 
 export const Route = createFileRoute("/configuracion-ensayo")({
   component: ConfigEnsayo,
@@ -69,11 +69,14 @@ function ConfigEnsayo() {
   const queryClient = useQueryClient();
   const [selectedScriptId, setSelectedScriptId] = useState("");
 
+  const hidratado = useRef(false);
   useEffect(() => {
+    if (hidratado.current) return;
+    hidratado.current = true;
     const saved = localStorage.getItem("configuracionEnsayoScriptId");
     if (saved) {
-      localStorage.removeItem("configuracionEnsayoScriptId");
       setSelectedScriptId(saved);
+      localStorage.removeItem("configuracionEnsayoScriptId");
     }
   }, []);
   const [selectedSceneId, setSelectedSceneId] = useState("");
@@ -99,78 +102,38 @@ function ConfigEnsayo() {
     queryFn: () => getScripts(),
   });
 
-  // Carga los grupos del usuario para determinar disponibilidad del modo grupo
-  // independientemente del script seleccionado en el dropdown.
-  const { data: misGrupos = [], isLoading: misGruposLoading } = useQuery({
-    queryKey: ["mis-grupos"],
-    queryFn: getMisGrupos,
+  const { data: grupoParaScript, isLoading: grupoLoading } = useQuery({
+    queryKey: ["grupo-para-script", selectedScriptId],
+    queryFn: () => getGrupoParaScript(selectedScriptId!),
+    enabled: !!selectedScriptId,
   });
-
-  // Script del grupo via SECURITY DEFINER (bypasa RLS aunque el miembro no lo posea)
-  const grupoParaEnsayo = misGrupos[0] ?? null;
-  const { data: grupoScript, isLoading: grupoScriptLoading } = useQuery({
-    queryKey: ["grupo-script", grupoParaEnsayo?.id],
-    queryFn: () => getScriptDelGrupo(grupoParaEnsayo!.id),
-    enabled: Boolean(grupoParaEnsayo?.id),
-  });
-
-  // Asignaciones del grupo (personaje por actor) — usa el script del grupo, no selectedScriptId
-  const { data: grupoParaScript, isLoading: grupoAsignLoading } = useQuery({
-    queryKey: ["grupo-para-script", grupoScript?.id],
-    queryFn: () => getGrupoParaScript(grupoScript!.id),
-    enabled: Boolean(grupoScript?.id),
-  });
-
-  const grupoLoading = misGruposLoading || grupoScriptLoading || grupoAsignLoading;
-  const grupoActivo = !grupoLoading && !!grupoScript;
+  const grupoActivo = !grupoLoading && !!grupoParaScript;
   const personajeGrupoId = grupoParaScript?.personajeId ?? null;
   const isAdminGrupo = grupoParaScript?.rol === "admin";
 
-  // En modo grupo siempre se usa el script del grupo, no el selectedScriptId del usuario
-  const effectiveScriptId = mode === "grupo" && grupoScript ? grupoScript.id : selectedScriptId;
+  const effectiveScriptId = selectedScriptId;
 
-  // Combinar scripts propios con el script del grupo (sin duplicados)
-  const allScripts = useMemo(() => {
-    if (!grupoScript) return scripts;
-    if (scripts.some((s) => s.id === grupoScript.id)) return scripts;
-    return [grupoScript, ...scripts];
-  }, [scripts, grupoScript]);
+  const allScripts = scripts;
 
   const { data: setup, isLoading: setupLoading } = useQuery({
-    queryKey: ["script-setup", effectiveScriptId, selectedSceneId, grupoScript?.id, grupoParaEnsayo?.id],
+    queryKey: ["script-setup", effectiveScriptId, selectedSceneId, grupoParaScript?.grupoId],
     queryFn: async () => {
-      // Si el script activo es el del grupo (propiedad de otro usuario),
-      // los SELECT directos a scenes/characters fallan por RLS.
-      // Usamos funciones SECURITY DEFINER para bypassarlos.
-      if (grupoParaEnsayo?.id && grupoScript && grupoScript.id === effectiveScriptId) {
-        const details = await getScriptDetailsForGrupo(effectiveScriptId, grupoParaEnsayo.id);
+      if (grupoParaScript?.grupoId && effectiveScriptId) {
+        const details = await getScriptDetailsForGrupo(effectiveScriptId, grupoParaScript.grupoId);
         const scene =
           details.scenes.find((s) => s.id === selectedSceneId) ?? details.scenes[0] ?? null;
         return {
-          script: grupoScript,
+          script: scripts.find((s) => s.id === effectiveScriptId) ?? null,
           scenes: details.scenes,
           scene,
           characters: details.characters,
           lines: scene ? details.lines.filter((l) => l.scene_id === scene.id) : [],
         };
       }
-
-      return getScriptSetup(
-        effectiveScriptId || undefined,
-        selectedSceneId || undefined,
-        grupoScript ?? undefined,
-      );
+      return getScriptSetup(effectiveScriptId || undefined, selectedSceneId || undefined);
     },
     enabled: Boolean(effectiveScriptId),
   });
-
-  // Auto-seleccionar primer script solo cuando no hay ninguno seleccionado
-  // (no sobreescribir el que llegó desde localStorage o desde el grupo)
-  useEffect(() => {
-    if (!selectedScriptId && allScripts.length > 0 && allScripts[0]) {
-      setSelectedScriptId(allScripts[0].id);
-    }
-  }, [selectedScriptId, allScripts]);
 
   // Auto-seleccionar primera escena
   useEffect(() => {
@@ -200,13 +163,6 @@ function ConfigEnsayo() {
     if (mode !== "grupo" || isAdminGrupo || !personajeGrupoId) return;
     setSelectedCharacterId(personajeGrupoId);
   }, [mode, isAdminGrupo, personajeGrupoId]);
-
-  // Al cambiar a modo grupo, auto-seleccionar el script del grupo si existe
-  useEffect(() => {
-    if (mode !== "grupo" || !grupoScript) return;
-    setSelectedScriptId(grupoScript.id);
-    setSelectedSceneId("");
-  }, [mode, grupoScript?.id]);
 
   // Si no hay grupo activo y el usuario está en modo grupo, volver a individual
   useEffect(() => {
@@ -312,11 +268,13 @@ function ConfigEnsayo() {
       }
       setActorTypeMap(newMap);
       setSelectedCharacterId(char.id);
-      await Promise.allSettled(
-        Object.entries(newMap).map(([id, type]) =>
-          updateCharacter(id, { actor_type: type }),
-        ),
-      );
+      if (mode !== "grupo") {
+        await Promise.allSettled(
+          Object.entries(newMap).map(([id, type]) =>
+            updateCharacter(id, { actor_type: type }),
+          ),
+        );
+      }
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : "Error al asignar personaje"),
   });
@@ -377,7 +335,7 @@ function ConfigEnsayo() {
                   <div className="mt-1 bg-surface/60 border border-border/60 rounded-lg px-3 py-2.5 text-sm flex items-center gap-2 opacity-80">
                     <Lock className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
                     <span className="truncate">
-                      {grupoScript?.title ?? setup?.script?.title ?? "Libreto del grupo"}
+                      {setup?.script?.title ?? "Libreto del grupo"}
                     </span>
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
@@ -389,6 +347,7 @@ function ConfigEnsayo() {
                   label="Libreto"
                   value={selectedScriptId}
                   loading={scriptsLoading}
+                  placeholder="Selecciona un libreto"
                   options={(allScripts || []).filter(Boolean).map((s) => ({
                     value: s.id,
                     label: s.title,
@@ -511,7 +470,7 @@ function ConfigEnsayo() {
                   : undefined;
                 // ¿Este personaje me pertenece? (asignado al usuario actual)
                 const isMyCharacter = isGrupoMode
-                  ? character.id === personajeGrupoId
+                  ? character.id === personajeGrupoId || (isAdminGrupo && character.id === selectedCharacterId)
                   : selectedCharacterId === character.id;
                 // ¿Está asignado a otro actor del grupo?
                 const isOtherActorChar = Boolean(
@@ -866,12 +825,14 @@ function SelectField({
   options,
   loading,
   onChange,
+  placeholder,
 }: {
   label: string;
   value: string;
   loading: boolean;
   options: { value: string; label: string; sub?: string }[];
   onChange: (value: string) => void;
+  placeholder?: string;
 }) {
   const selected = options.find((option) => option.value === value);
 
@@ -886,8 +847,9 @@ function SelectField({
         className="w-full mt-1 bg-surface border border-border/60 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:border-primary/50"
       >
         {loading && <option value="">Cargando...</option>}
-        {!loading && options.length === 0 && <option value="">Sin opciones</option>}
-        {options.map((option) => (
+        {!loading && placeholder && <option value="" disabled>{placeholder}</option>}
+        {!loading && !placeholder && options.length === 0 && <option value="">Sin opciones</option>}
+        {!loading && options.map((option) => (
           <option key={option.value} value={option.value}>
             {option.label}
           </option>

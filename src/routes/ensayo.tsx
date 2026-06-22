@@ -60,11 +60,16 @@ function Ensayo() {
 
   // ── Navegación de líneas ──────────────────────────────────────────────────
   const [activeLineIndex, setActiveLineIndex] = useState(0);
+  const activeLineIndexRef = useRef(0);
+  useEffect(() => { activeLineIndexRef.current = activeLineIndex; }, [activeLineIndex]);
 
   // ── Flujo automático ──────────────────────────────────────────────────────
   const [autoFlow, setAutoFlow] = useState(false);
   const autoFlowRef = useRef(false); // ref para acceder dentro de callbacks
-  useEffect(() => { autoFlowRef.current = autoFlow; }, [autoFlow]);
+  useEffect(() => {
+    autoFlowRef.current = autoFlow;
+    console.log("[autoFlow → state]", autoFlow);
+  }, [autoFlow]);
 
   // ── Grabación ────────────────────────────────────────────────────────────
   const [isRecording, setIsRecording] = useState(false);
@@ -140,6 +145,8 @@ function Ensayo() {
 
   const loading = rehearsalLoading || setupLoading;
   const lines = useMemo(() => setup?.lines ?? [], [setup?.lines]);
+  const linesRef = useRef<ScriptLineWithCharacter[]>([]);
+  useEffect(() => { linesRef.current = lines; }, [lines]);
 
   const currentLine = lines[activeLineIndex] ?? null;
   const nextLine = lines[activeLineIndex + 1] ?? null;
@@ -313,6 +320,7 @@ function Ensayo() {
           await updateRehearsalSession(latest.id, { completed_lines: next });
         } catch {}
       } else {
+        console.log("[setAutoFlow false] handleSpeechFinal — activeLineIndex:", activeLineIndex, "| lines.length:", lines.length);
         setConnectionStatus("¡Escena completa!");
         setAutoFlow(false);
       }
@@ -363,7 +371,9 @@ function Ensayo() {
 
   const speakLine = useCallback(
     (text: string, lineId: string, onEnd?: () => void, voiceName?: string) => {
-      window.speechSynthesis.cancel();
+      const ss = window.speechSynthesis;
+      console.log("[speakLine] llamado | lineId:", lineId, "| paused:", ss.paused, "| speaking:", ss.speaking, "| pending:", ss.pending, "| voz:", voiceName ?? "(default)", "| texto:", text.slice(0, 60));
+      ss.cancel();
       const utt = new SpeechSynthesisUtterance(text);
       utt.lang = "es-MX";
       utt.rate = 0.9;
@@ -371,15 +381,23 @@ function Ensayo() {
       const voice = resolveVoice(voiceName);
       if (voice) utt.voice = voice;
       utt.onend = () => {
+        console.log("[speakLine] onend | lineId:", lineId);
         setIsPlaying(false);
         setPlayingLineId(null);
         setConnectionStatus("Listo.");
         onEnd?.();
       };
+      utt.onerror = (e) => {
+        console.log("[speakLine] onerror | lineId:", lineId, "| error:", e.error);
+        setIsPlaying(false);
+        setPlayingLineId(null);
+        onEnd?.();
+      };
       setIsPlaying(true);
       setPlayingLineId(lineId);
       setConnectionStatus("IA leyendo línea...");
-      window.speechSynthesis.speak(utt);
+      ss.speak(utt);
+      console.log("[speakLine] speak() llamado | ss.speaking:", ss.speaking, "| ss.paused:", ss.paused);
     },
     [],
   );
@@ -449,17 +467,26 @@ function Ensayo() {
 
   // ── Flujo automático ──────────────────────────────────────────────────────
   useEffect(() => {
-    if (!autoFlow || !currentLine || isRecording || isPlaying || loading || processingRef.current) return;
+    console.log("[autoFlow] effect | autoFlow:", autoFlow, "| currentLine:", currentLine?.id ?? null, "| isRecording:", isRecording, "| isPlaying:", isPlaying, "| loading:", loading, "| processing:", processingRef.current, "| isMyTurn:", isMyTurn, "| idx:", activeLineIndex);
+    if (!autoFlow) { console.log("[autoFlow] BLOQUEADO: autoFlow=false"); return; }
+    if (!currentLine) { console.log("[autoFlow] BLOQUEADO: currentLine=null"); return; }
+    if (isRecording) { console.log("[autoFlow] BLOQUEADO: isRecording=true"); return; }
+    if (isPlaying) { console.log("[autoFlow] BLOQUEADO: isPlaying=true"); return; }
+    if (loading) { console.log("[autoFlow] BLOQUEADO: loading=true"); return; }
+    if (processingRef.current) { console.log("[autoFlow] BLOQUEADO: processingRef=true"); return; }
 
     // Acotación escénica: mostrar brevemente y avanzar sin grabar ni reproducir
     if (currentLine.cue === "stage_direction") {
       const timer = setTimeout(() => {
         if (!autoFlowRef.current) return;
-        if (activeLineIndex < lines.length - 1) {
-          const next = activeLineIndex + 1;
+        const idx = activeLineIndexRef.current;
+        const total = linesRef.current.length;
+        if (idx < total - 1) {
+          const next = idx + 1;
           setCompletedCount((c) => Math.max(c, next));
           setActiveLineIndex(next);
         } else {
+          console.log("[setAutoFlow false] stage_direction timeout — activeLineIndex:", idx, "| lines.length:", total);
           setAutoFlow(false);
           setConnectionStatus("¡Escena completa!");
         }
@@ -469,11 +496,14 @@ function Ensayo() {
 
     const onAiEnd = () => {
       if (!autoFlowRef.current) return;
-      if (activeLineIndex < lines.length - 1) {
-        const next = activeLineIndex + 1;
+      const idx = activeLineIndexRef.current;
+      const total = linesRef.current.length;
+      if (idx < total - 1) {
+        const next = idx + 1;
         setCompletedCount((c) => Math.max(c, next));
         setActiveLineIndex(next);
       } else {
+        console.log("[setAutoFlow false] onAiEnd — activeLineIndex:", idx, "| lines.length:", total);
         setAutoFlow(false);
         setConnectionStatus("¡Escena completa!");
       }
@@ -484,10 +514,13 @@ function Ensayo() {
       handleStartRecording();
     } else {
       // En Lectura no usamos audioUrls propias (solo TTS); en otros modos sí
-      const savedUrl = isLectura ? undefined : mergedAudioUrls[currentLine.id];
+      const savedUrl = latest?.mode === "grupo" && !isLectura ? groupAudioUrls[currentLine.id] : undefined;
+      console.log("[autoFlow] rama IA | lineId:", currentLine.id, "| mode:", latest?.mode, "| isLectura:", isLectura, "| savedUrl:", savedUrl ?? null, "| groupAudioUrls keys:", Object.keys(groupAudioUrls));
       if (savedUrl) {
+        console.log("[autoFlow] → playAudioUrl con URL:", savedUrl);
         playAudioUrl(savedUrl, currentLine.id, onAiEnd);
       } else {
+        console.log("[autoFlow] → speakLine con texto:", currentLine.text.slice(0, 60));
         speakLine(currentLine.text, currentLine.id, onAiEnd, currentLine.character?.voice ?? undefined);
       }
     }
@@ -527,6 +560,7 @@ function Ensayo() {
 
   const handleReset = useCallback(() => {
     setActiveLineIndex(0);
+    console.log("[setAutoFlow false] handleReset — manual");
     setAutoFlow(false);
     window.speechSynthesis.cancel();
     audioRef.current?.pause();
@@ -538,6 +572,7 @@ function Ensayo() {
   const handleFinalize = useCallback(async () => {
     window.speechSynthesis.cancel();
     audioRef.current?.pause();
+    console.log("[setAutoFlow false] handleFinalize — manual");
     setAutoFlow(false);
 
     if (latest?.id) {
