@@ -1,17 +1,17 @@
 import { useEffect, useState } from "react";
 
-// ── Detección de género por nombre de voz ─────────────────────────────────────
 const FEMALE_RE =
   /\b(sofia|sabina|elena|monica|conchita|paulina|valeria|raquel|penelope|silvia|laura|maria|carmen|fernanda|natalia|rosa|lucia|claudia|alicia|mujer|female|woman|femenin)\b/i;
 const MALE_RE =
-  /\b(diego|pablo|jorge|enrique|miguel|carlos|juan|jose|manuel|antonio|male|man|hombre|masculin)\b/i;
+  /\b(diego|pablo|jorge|enrique|miguel|carlos|juan|jose|manuel|antonio|raul|male|man|hombre|masculin)\b/i;
+
+export const PREFS_VOICE_KEY = "prefs_voice";
 
 export type VoiceGender = "female" | "male" | "unknown";
 
 export type SpanishVoice = {
   voice: SpeechSynthesisVoice;
   gender: VoiceGender;
-  /** Nombre real del sistema para mostrar en UI */
   label: string;
 };
 
@@ -25,33 +25,24 @@ function loadSpanishVoices(): SpanishVoice[] {
   if (typeof window === "undefined" || !window.speechSynthesis) return [];
   const all = window.speechSynthesis.getVoices();
   const spanish = all.filter((v) => v.lang.toLowerCase().startsWith("es"));
-  // Si el sistema no tiene voces en español, mostrar todas como fallback
   const pool = spanish.length > 0 ? spanish : all;
   return pool.map((v) => ({ voice: v, gender: guessGender(v), label: v.name }));
 }
 
-/**
- * Hook que devuelve las voces en español disponibles en el navegador.
- * Maneja la carga asíncrona de Chrome (evento voiceschanged).
- */
 export function useSpeechVoices(): SpanishVoice[] {
   const [voices, setVoices] = useState<SpanishVoice[]>(() => loadSpanishVoices());
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
     const load = () => setVoices(loadSpanishVoices());
-    load(); // Firefox/Safari: sincrónico
-    window.speechSynthesis.addEventListener("voiceschanged", load); // Chrome: asíncrono
+    load();
+    window.speechSynthesis.addEventListener("voiceschanged", load);
     return () => window.speechSynthesis.removeEventListener("voiceschanged", load);
   }, []);
 
   return voices;
 }
 
-/**
- * Devuelve la primera voz de un género determinado.
- * Si no hay voces con género conocido, "female" → primera, "male" → segunda.
- */
 export function getDefaultVoiceName(
   gender: "female" | "male",
   voices: SpanishVoice[],
@@ -62,22 +53,38 @@ export function getDefaultVoiceName(
   return fallback?.voice.name ?? "";
 }
 
-/**
- * Resuelve una voz por nombre para usarla en SpeechSynthesisUtterance.
- * Se llama dentro de callbacks (fuera de React) por lo que usa getVoices() directamente.
- * Si el nombre no existe o es null, devuelve la primera voz en español disponible.
- */
-export function resolveVoice(name: string | null | undefined): SpeechSynthesisVoice | null {
+function hashText(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+export function resolveVoice(
+  name: string | null | undefined,
+  fallbackKey?: string | null,
+): SpeechSynthesisVoice | null {
   if (typeof window === "undefined" || !window.speechSynthesis) return null;
+
   const all = window.speechSynthesis.getVoices();
+  const spanish = all.filter((v) => v.lang.toLowerCase().startsWith("es"));
+  const pool = spanish.length > 0 ? spanish : all;
+
   if (name) {
     const found = all.find((v) => v.name === name);
     if (found) return found;
   }
-  // Fallback: primera voz española, o cualquier voz disponible
-  return (
-    all.find((v) => v.lang.toLowerCase().startsWith("es")) ??
-    all[0] ??
-    null
-  );
+
+  if (fallbackKey && pool.length > 0) {
+    return pool[hashText(fallbackKey) % pool.length] ?? null;
+  }
+
+  const preferred = window.localStorage.getItem(PREFS_VOICE_KEY);
+  if (preferred) {
+    const found = all.find((v) => v.name === preferred);
+    if (found) return found;
+  }
+
+  return pool[0] ?? null;
 }

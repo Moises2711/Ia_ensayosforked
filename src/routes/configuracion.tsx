@@ -6,7 +6,7 @@ import { AppShell } from "@/components/AppShell";
 import { TopBar } from "@/components/TopBar";
 import { Mic, Volume2, Bell, Shield, Download, Save, User } from "lucide-react";
 import { getPerfilUsuario, updatePerfilUsuario } from "@/lib/rehearsal-data";
-import { useSpeechVoices, getDefaultVoiceName } from "@/lib/useSpeechVoices";
+import { useSpeechVoices, getDefaultVoiceName, PREFS_VOICE_KEY } from "@/lib/useSpeechVoices";
 
 export const Route = createFileRoute("/configuracion")({
   component: Configuracion,
@@ -31,7 +31,9 @@ function Configuracion() {
   const profile = data?.profile;
   const [displayName, setDisplayName] = useState("");
   const spanishVoices = useSpeechVoices();
-  const [preferredVoice, setPreferredVoice] = useState("");
+  const [preferredVoice, setPreferredVoice] = useState(
+    () => localStorage.getItem(PREFS_VOICE_KEY) ?? "",
+  );
   const [mode, setMode] = useState("individual");
   const [difficulty, setDifficulty] = useState(50);
   const [notifications, setNotifications] = useState(true);
@@ -55,6 +57,7 @@ function Configuracion() {
   const saveProfile = useMutation({
     mutationFn: () => {
       localStorage.setItem("prefs_privacy", privacy);
+      localStorage.setItem(PREFS_VOICE_KEY, preferredVoice);
       return updatePerfilUsuario({
         display_name: displayName,
         nombre_usuario: displayName,

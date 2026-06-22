@@ -90,6 +90,7 @@ function Ensayo() {
   const [groupAudioUrls, setGroupAudioUrls] = useState<Record<string, string>>({});
   const [grupoActorNames, setGrupoActorNames] = useState<Record<string, string>>({});
   const [grupoPersonajeId, setGrupoPersonajeId] = useState<string | null>(null);
+  const [grupoInfoLoading, setGrupoInfoLoading] = useState(false);
   const [lineScores, setLineScores] = useState<Record<string, number>>({});
 
   // ── Stats ─────────────────────────────────────────────────────────────────
@@ -155,15 +156,16 @@ function Ensayo() {
   const selectedCharacter = useMemo(() => {
     // Modo grupo: usar el personaje asignado al usuario actual en grupo_miembros,
     // que es la fuente autoritativa — independiente de lo que tenga la sesión cacheada.
-    if (latest?.mode === "grupo" && grupoPersonajeId) {
-      return setup?.characters.find((c) => c.id === grupoPersonajeId) ?? null;
+    if (latest?.mode === "grupo") {
+      const characterId = grupoPersonajeId ?? latest.selected_character_id;
+      return characterId ? (setup?.characters.find((c) => c.id === characterId) ?? null) : null;
     }
     return (
       latest?.selectedCharacter ??
       setup?.characters.find((c) => c.actor_type === "user") ??
       null
     );
-  }, [latest?.mode, latest?.selectedCharacter, grupoPersonajeId, setup?.characters]);
+  }, [latest?.mode, latest?.selectedCharacter, latest?.selected_character_id, grupoPersonajeId, setup?.characters]);
 
   // BUG 1: Usa teleprompter_session_id de Supabase (ya guardado por configuracion-ensayo.tsx)
   const localSessionId = useMemo(
@@ -175,6 +177,7 @@ function Ensayo() {
   const progress = Math.min(100, Math.round((completedCount / total) * 100));
   const isMyTurn = currentLine?.character_id === selectedCharacter?.id;
   const isLectura = latest?.mode === "lectura";
+  const isGrupoMode = latest?.mode === "grupo";
 
   // ── Inicializar desde progreso guardado ───────────────────────────────────
   useEffect(() => {
@@ -214,18 +217,35 @@ function Ensayo() {
 
   // ── Grabaciones del grupo: audio de otros actores para este script ────────
   useEffect(() => {
-    if (!latest?.script_id) return;
+    setGroupAudioUrls({});
+    if (!latest?.script_id || latest.mode !== "grupo") return;
+    let cancelled = false;
     getGrabacionesGrupo(latest.script_id)
-      .then((urls) => setGroupAudioUrls(urls))
+      .then((urls) => {
+        if (!cancelled) setGroupAudioUrls(urls);
+      })
       .catch(() => {});
-  }, [latest?.script_id]);
+    return () => { cancelled = true; };
+  }, [latest?.script_id, latest?.mode]);
 
   // ── Asignaciones del grupo: { [characterId]: displayName } + personaje propio ─
   useEffect(() => {
-    if (!latest?.script_id) return;
+    setGrupoPersonajeId(null);
+    setGrupoActorNames({});
+    if (!latest?.script_id || latest.mode !== "grupo") {
+      setGrupoInfoLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setGrupoInfoLoading(true);
     getGrupoParaScript(latest.script_id)
       .then((gps) => {
-        if (!gps) return;
+        if (cancelled) return;
+        if (!gps) {
+          setGrupoPersonajeId(null);
+          setGrupoActorNames({});
+          return;
+        }
         setGrupoPersonajeId(gps.personajeId ?? null);
         const names: Record<string, string> = {};
         for (const [charId, asig] of Object.entries(gps.asignaciones)) {
@@ -233,14 +253,17 @@ function Ensayo() {
         }
         setGrupoActorNames(names);
       })
-      .catch(() => {});
-  }, [latest?.script_id]);
-
-  // Own recordings override group recordings (same key = same line id)
-  const mergedAudioUrls = useMemo(
-    () => ({ ...groupAudioUrls, ...audioUrls }),
-    [groupAudioUrls, audioUrls],
-  );
+      .catch(() => {
+        if (!cancelled) {
+          setGrupoPersonajeId(null);
+          setGrupoActorNames({});
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setGrupoInfoLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [latest?.script_id, latest?.mode]);
 
   // ── BUG 4: Web Speech API — callback cuando finaliza reconocimiento ────────
   const handleSpeechFinal = useCallback(
@@ -354,8 +377,11 @@ function Ensayo() {
         setIsPlaying(true);
         setPlayingLineId(lineId);
         setConnectionStatus("Reproduciendo audio grabado...");
+        let finished = false;
 
         const finish = () => {
+          if (finished) return;
+          finished = true;
           setIsPlaying(false);
           setPlayingLineId(null);
           setConnectionStatus("Listo.");
@@ -370,7 +396,13 @@ function Ensayo() {
   );
 
   const speakLine = useCallback(
-    (text: string, lineId: string, onEnd?: () => void, voiceName?: string) => {
+    (
+      text: string,
+      lineId: string,
+      onEnd?: () => void,
+      voiceName?: string,
+      fallbackVoiceKey?: string,
+    ) => {
       const ss = window.speechSynthesis;
       console.log("[speakLine] llamado | lineId:", lineId, "| paused:", ss.paused, "| speaking:", ss.speaking, "| pending:", ss.pending, "| voz:", voiceName ?? "(default)", "| texto:", text.slice(0, 60));
       ss.cancel();
@@ -378,7 +410,7 @@ function Ensayo() {
       utt.lang = "es-MX";
       utt.rate = 0.9;
       utt.pitch = 1.0;
-      const voice = resolveVoice(voiceName);
+      const voice = resolveVoice(voiceName, fallbackVoiceKey ?? lineId);
       if (voice) utt.voice = voice;
       utt.onend = () => {
         console.log("[speakLine] onend | lineId:", lineId);
@@ -474,6 +506,16 @@ function Ensayo() {
     if (isPlaying) { console.log("[autoFlow] BLOQUEADO: isPlaying=true"); return; }
     if (loading) { console.log("[autoFlow] BLOQUEADO: loading=true"); return; }
     if (processingRef.current) { console.log("[autoFlow] BLOQUEADO: processingRef=true"); return; }
+    if (isGrupoMode && grupoInfoLoading) {
+      console.log("[autoFlow] BLOQUEADO: cargando asignacion de grupo");
+      setConnectionStatus("Cargando tu personaje del grupo...");
+      return;
+    }
+    if (isGrupoMode && !selectedCharacter) {
+      console.log("[autoFlow] BLOQUEADO: sin personaje asignado en grupo");
+      setConnectionStatus("No hay personaje asignado para este ensayo grupal.");
+      return;
+    }
 
     // Acotación escénica: mostrar brevemente y avanzar sin grabar ni reproducir
     if (currentLine.cue === "stage_direction") {
@@ -521,11 +563,17 @@ function Ensayo() {
         playAudioUrl(savedUrl, currentLine.id, onAiEnd);
       } else {
         console.log("[autoFlow] → speakLine con texto:", currentLine.text.slice(0, 60));
-        speakLine(currentLine.text, currentLine.id, onAiEnd, currentLine.character?.voice ?? undefined);
+        speakLine(
+          currentLine.text,
+          currentLine.id,
+          onAiEnd,
+          currentLine.character?.voice ?? undefined,
+          currentLine.character?.name ?? currentLine.id,
+        );
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeLineIndex, autoFlow, isMyTurn, isLectura, loading]);
+  }, [activeLineIndex, autoFlow, isMyTurn, isLectura, loading, isGrupoMode, grupoInfoLoading, selectedCharacter?.id]);
 
   // ── Controles manuales ────────────────────────────────────────────────────
   const handleTogglePlayback = useCallback(
@@ -540,7 +588,7 @@ function Ensayo() {
         await playAudioUrl(audioUrl, lineId);
       } else if (text) {
         const line = lines.find((l) => l.id === lineId);
-        speakLine(text, lineId, undefined, line?.character?.voice ?? undefined);
+        speakLine(text, lineId, undefined, line?.character?.voice ?? undefined, line?.character?.name ?? lineId);
       }
     },
     [isPlaying, playingLineId, playAudioUrl, speakLine, lines],
@@ -668,9 +716,9 @@ function Ensayo() {
             line={currentLine}
             selectedCharacterId={selectedCharacter?.id ?? null}
             active
-            audioUrl={currentLine ? mergedAudioUrls[currentLine.id] : undefined}
-            isGroupAudio={currentLine ? Boolean(groupAudioUrls[currentLine.id] && !audioUrls[currentLine.id]) : false}
-            actorName={currentLine?.character_id ? grupoActorNames[currentLine.character_id] : undefined}
+            audioUrl={currentLine ? (isGrupoMode ? groupAudioUrls[currentLine.id] : currentLine.character_id === selectedCharacter?.id ? audioUrls[currentLine.id] : undefined) : undefined}
+            isGroupAudio={currentLine ? Boolean(isGrupoMode && groupAudioUrls[currentLine.id] && !audioUrls[currentLine.id]) : false}
+            actorName={isGrupoMode && currentLine?.character_id ? grupoActorNames[currentLine.character_id] : undefined}
             score={currentLine ? lineScores[currentLine.id] : undefined}
             isPlaying={isPlaying && playingLineId === currentLine?.id}
             onTogglePlayback={handleTogglePlayback}
@@ -680,9 +728,9 @@ function Ensayo() {
             title="Siguiente línea"
             line={nextLine}
             selectedCharacterId={selectedCharacter?.id ?? null}
-            audioUrl={nextLine ? mergedAudioUrls[nextLine.id] : undefined}
-            isGroupAudio={nextLine ? Boolean(groupAudioUrls[nextLine.id] && !audioUrls[nextLine.id]) : false}
-            actorName={nextLine?.character_id ? grupoActorNames[nextLine.character_id] : undefined}
+            audioUrl={nextLine ? (isGrupoMode ? groupAudioUrls[nextLine.id] : nextLine.character_id === selectedCharacter?.id ? audioUrls[nextLine.id] : undefined) : undefined}
+            isGroupAudio={nextLine ? Boolean(isGrupoMode && groupAudioUrls[nextLine.id] && !audioUrls[nextLine.id]) : false}
+            actorName={isGrupoMode && nextLine?.character_id ? grupoActorNames[nextLine.character_id] : undefined}
             score={nextLine ? lineScores[nextLine.id] : undefined}
             isPlaying={isPlaying && playingLineId === nextLine?.id}
             onTogglePlayback={handleTogglePlayback}
@@ -692,9 +740,9 @@ function Ensayo() {
             line={afterLine}
             selectedCharacterId={selectedCharacter?.id ?? null}
             faded
-            audioUrl={afterLine ? mergedAudioUrls[afterLine.id] : undefined}
-            isGroupAudio={afterLine ? Boolean(groupAudioUrls[afterLine.id] && !audioUrls[afterLine.id]) : false}
-            actorName={afterLine?.character_id ? grupoActorNames[afterLine.character_id] : undefined}
+            audioUrl={afterLine ? (isGrupoMode ? groupAudioUrls[afterLine.id] : afterLine.character_id === selectedCharacter?.id ? audioUrls[afterLine.id] : undefined) : undefined}
+            isGroupAudio={afterLine ? Boolean(isGrupoMode && groupAudioUrls[afterLine.id] && !audioUrls[afterLine.id]) : false}
+            actorName={isGrupoMode && afterLine?.character_id ? grupoActorNames[afterLine.character_id] : undefined}
             score={afterLine ? lineScores[afterLine.id] : undefined}
             isPlaying={isPlaying && playingLineId === afterLine?.id}
             onTogglePlayback={handleTogglePlayback}
@@ -762,7 +810,13 @@ function Ensayo() {
             {/* BUG 7: Botón flujo automático — bloqueado en lectura (siempre activo) */}
             <button
               onClick={() => !isLectura && setAutoFlow((v) => !v)}
-              disabled={isRecording || loading || lines.length === 0 || isLectura}
+              disabled={
+                isRecording ||
+                loading ||
+                lines.length === 0 ||
+                isLectura ||
+                (isGrupoMode && (grupoInfoLoading || !selectedCharacter))
+              }
               className={`flex flex-col items-center gap-1 px-3 py-2 rounded-lg border text-xs transition disabled:opacity-50 ${
                 autoFlow
                   ? "border-primary/60 bg-primary/10 text-primary"
@@ -798,7 +852,7 @@ function Ensayo() {
             <Quick label="Sesión" value={localSessionId ? "Conectado" : "Sin sesión"} />
             <Quick label="Turno actual" value={isMyTurn ? "Tú hablas" : "IA / escucha"} />
             <Quick label="Flujo auto" value={autoFlow ? "Activado" : "Manual"} />
-            {Object.keys(groupAudioUrls).length > 0 && (
+            {isGrupoMode && Object.keys(groupAudioUrls).length > 0 && (
               <Quick
                 label="Ensayo grupal"
                 value={`${Object.keys(groupAudioUrls).length} líneas grabadas`}

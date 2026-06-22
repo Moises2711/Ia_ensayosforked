@@ -5,7 +5,6 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { AuthShell, Field } from "@/components/AuthShell";
 import { supabase } from "@/integrations/supabase/client";
-import { lovable } from "@/integrations/lovable";
 
 export const Route = createFileRoute("/login")({
   head: () => ({
@@ -42,19 +41,6 @@ function Login() {
 
     queryClient.invalidateQueries({ queryKey: ["perfil-usuario"] });
     toast.success("Bienvenido de nuevo");
-    nav({ to: "/" });
-  };
-
-  const google = async () => {
-    const result = await lovable.auth.signInWithOAuth("google", {
-      redirect_uri: window.location.origin,
-    });
-    if (result.error) {
-      toast.error("No se pudo iniciar sesion con Google");
-      return;
-    }
-    if (result.redirected) return;
-    queryClient.invalidateQueries({ queryKey: ["perfil-usuario"] });
     nav({ to: "/" });
   };
 
@@ -107,21 +93,6 @@ function Login() {
           )}
         </button>
 
-        <div className="flex items-center gap-3 my-6">
-          <div className="h-px flex-1 bg-border" />
-          <span className="text-[10px] tracking-widest text-muted-foreground uppercase">
-            o continua con
-          </span>
-          <div className="h-px flex-1 bg-border" />
-        </div>
-
-        <button
-          type="button"
-          onClick={google}
-          className="w-full border border-border bg-surface rounded-lg py-2.5 text-sm hover:border-primary/40 transition"
-        >
-          Continuar con Google
-        </button>
       </form>
     </AuthShell>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -37,7 +37,8 @@ import {
   createTeleprompterEnsayo,
   teleprompterApiUrl,
 } from "@/lib/teleprompter-api";
-import { getGrupoParaScript, getScriptDetailsForGrupo } from "@/lib/grupos-api";
+import { getGrupoParaScript, getScriptDetailsForGrupo, getScriptsDeGrupos } from "@/lib/grupos-api";
+import { useSpeechVoices } from "@/lib/useSpeechVoices";
 
 export const Route = createFileRoute("/configuracion-ensayo")({
   component: ConfigEnsayo,
@@ -88,6 +89,7 @@ function ConfigEnsayo() {
   const [newCharType, setNewCharType] = useState<"user" | "ai">("ai");
   const [openCharMenuId, setOpenCharMenuId] = useState<string | null>(null);
   const [actorTypeMap, setActorTypeMap] = useState<Record<string, "user" | "ai">>({});
+  const spanishVoices = useSpeechVoices();
 
   useQuery({
     queryKey: ["perfil-usuario"],
@@ -101,6 +103,10 @@ function ConfigEnsayo() {
     queryKey: ["scripts"],
     queryFn: () => getScripts(),
   });
+  const { data: grupoScripts = [], isLoading: grupoScriptsLoading } = useQuery({
+    queryKey: ["scripts-de-grupos"],
+    queryFn: getScriptsDeGrupos,
+  });
 
   const { data: grupoParaScript, isLoading: grupoLoading } = useQuery({
     queryKey: ["grupo-para-script", selectedScriptId],
@@ -113,7 +119,14 @@ function ConfigEnsayo() {
 
   const effectiveScriptId = selectedScriptId;
 
-  const allScripts = scripts;
+  const allScripts = useMemo(
+    () => [
+      ...scripts,
+      ...grupoScripts.filter((groupScript) => !scripts.some((script) => script.id === groupScript.id)),
+    ],
+    [scripts, grupoScripts],
+  );
+  const scriptsSelectLoading = scriptsLoading || grupoScriptsLoading;
 
   const { data: setup, isLoading: setupLoading } = useQuery({
     queryKey: ["script-setup", effectiveScriptId, selectedSceneId, grupoParaScript?.grupoId],
@@ -123,7 +136,7 @@ function ConfigEnsayo() {
         const scene =
           details.scenes.find((s) => s.id === selectedSceneId) ?? details.scenes[0] ?? null;
         return {
-          script: scripts.find((s) => s.id === effectiveScriptId) ?? null,
+          script: allScripts.find((s) => s.id === effectiveScriptId) ?? null,
           scenes: details.scenes,
           scene,
           characters: details.characters,
@@ -279,6 +292,16 @@ function ConfigEnsayo() {
     onError: (e) => toast.error(e instanceof Error ? e.message : "Error al asignar personaje"),
   });
 
+  const updateVoiceMutation = useMutation({
+    mutationFn: ({ characterId, voice }: { characterId: string; voice: string | null }) =>
+      updateCharacter(characterId, { voice }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["script-setup"] });
+      toast.success("Voz actualizada");
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "No se pudo actualizar la voz"),
+  });
+
   const selectedMode = MODES.find((item) => item.value === mode) ?? MODES[0];
 
   const selectedCharacter =
@@ -346,7 +369,7 @@ function ConfigEnsayo() {
                 <SelectField
                   label="Libreto"
                   value={selectedScriptId}
-                  loading={scriptsLoading}
+                  loading={scriptsSelectLoading}
                   placeholder="Selecciona un libreto"
                   options={(allScripts || []).filter(Boolean).map((s) => ({
                     value: s.id,
@@ -563,7 +586,7 @@ function ConfigEnsayo() {
                     </button>
 
                     {(!isGrupoMode || isAdminGrupo) && menuOpen && (
-                      <div className="absolute right-0 top-full mt-1 bg-card border border-border rounded-lg shadow-lg z-20 py-1 min-w-[180px]">
+                      <div className="absolute right-0 top-full mt-1 bg-card border border-border rounded-lg shadow-lg z-20 py-2 min-w-[260px]">
                         <button
                           onClick={() => {
                             assignCharacterMutation.mutate(character);
@@ -573,6 +596,36 @@ function ConfigEnsayo() {
                         >
                           <Crown className="w-3.5 h-3.5" /> Interpretar este personaje
                         </button>
+                        {effectiveType === "ai" && (
+                          <div className="px-3 pt-2">
+                            <label className="block text-[10px] tracking-[0.18em] text-muted-foreground uppercase mb-1">
+                              Voz IA
+                            </label>
+                            <select
+                              value={character.voice ?? ""}
+                              disabled={updateVoiceMutation.isPending}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(event) => {
+                                updateVoiceMutation.mutate({
+                                  characterId: character.id,
+                                  voice: event.target.value || null,
+                                });
+                              }}
+                              className="w-full bg-surface border border-border/60 rounded-md px-2 py-1.5 text-xs focus:outline-none focus:border-primary/50"
+                            >
+                              <option value="">Auto por personaje</option>
+                              {spanishVoices.map((sv) => (
+                                <option key={sv.voice.name} value={sv.voice.name}>
+                                  {sv.gender === "female"
+                                    ? `${sv.voice.name} (F)`
+                                    : sv.gender === "male"
+                                      ? `${sv.voice.name} (M)`
+                                      : sv.voice.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
